@@ -1,4 +1,4 @@
-function WILD_PreProcess(filename,analogFile,lfp_gen,trig_gen)
+function WILD_PreProcess(filename,analogFile,lfp_gen,trig_gen,imu_gen)
 if(nargin<1)
     [filename, path] = uigetfile({'amplifier.dat','amplifier.dat'}, 'Select amplifier.dat', 'C:\Users\adaml\Documents\data\wild');
     filename = fullfile(path,"amplifier.dat");
@@ -18,6 +18,9 @@ end
 if nargin<4
     trig_gen = 1;
 end
+if nargin<5
+    imu_gen = 1;
+end
 [p_analog,fanalog,e]=fileparts(analogFile);
 if isempty(p_analog)
     analogFile = fullfile(path,[fanalog,e]);
@@ -28,7 +31,7 @@ analogfile = strrep(filename,'amplifier.dat','analogin.dat');
 audiofile = strrep(filename,'amplifier.dat','adc.dat');
 rec_info_file=strrep(filename,'amplifier.dat','CE_params.bin');
 
-sysparam = CE32_ReadHeader(fullfile(path,'CE_params.bin'));
+sysparam = WILD_ReadHeader(fullfile(path,'CE_params.bin'));
 % fh=fopen(rec_info_file);
 % rec_info=fread(fh,512/4,'unsigned long');
 fs_raw=sysparam.fs;
@@ -64,10 +67,11 @@ if(lfp_gen~=0)
     if fs_raw>0
     
         [b,a]=butter(2,0.5*2/fs,'high');
-        if isempty(dir('amplifier.lfp'))
-            dat2lfp_frank('amplifier.dat',b,a);
+        lfp_file = fullfile(path,'amplifier.lfp');
+        if isempty(dir(lfp_file))
+            dat2lfp_frank(filename,b,a);
         end
-        ephys = readmulti_frank('amplifier.lfp',Nch,1:Nch,0,inf);
+        ephys = readmulti_frank(lfp_file,Nch,1:Nch,0,inf);
     
     else
         [b,a]=butter(2,0.5*2/fs,'high');
@@ -183,4 +187,6 @@ try
 end
 
 %% IMU tracking
-WILD_processIMU(analogFile,100);
+if(imu_gen~=0)
+    WILD_processIMU(analogFile,100);
+end

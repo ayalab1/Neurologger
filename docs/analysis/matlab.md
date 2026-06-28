@@ -12,6 +12,7 @@ MATLAB scripts currently provide the main preprocessing path for WILD recordings
 | [`WILD_processIMU.m`](https://github.com/ayalab1/Neurologger/blob/main/Code/WILD_processIMU.m) | Process IMU data. |
 | [`WILD_scaleIMU.m`](https://github.com/ayalab1/Neurologger/blob/main/Code/WILD_scaleIMU.m) | Scale IMU signals. |
 | [`WILD_genIntanHeader.m`](https://github.com/ayalab1/Neurologger/blob/main/Code/WILD_genIntanHeader.m) | Generate Intan-compatible header output. |
+| [`WILD_PreProcess_Multi.m`](https://github.com/ayalab1/Neurologger/blob/main/Code/WILD_PreProcess_Multi.m) | Preprocess multiple synchronized devices and write a merged sorter-ready binary. |
 
 ## Minimal Workflow
 
@@ -55,3 +56,73 @@ example_recording/
 3. Run `WILD_processIMU` on `analogin.dat`.
 4. Confirm that `IMU.mat` is generated.
 5. Keep the raw export unchanged and write downstream results into a separate analysis copy when reprocessing.
+
+## Multi-Device Workflow
+
+Use `WILD_PreProcess_Multi.m` when multiple WILD logger exports should be merged before spike sorting. The current default path detects the device folders below a selected subepoch folder and calls `WILD_channelMerger.m`, which aligns two logger recordings from the neural common-mode signal rather than requiring generated `.evt` sync files.
+
+```matlab
+addpath("C:\code\github\Neurologger\Code");
+
+% Opens a folder-selection GUI for multiple WILD devices.
+result = WILD_PreProcess_Multi();
+```
+
+For scripted processing, pass the folders explicitly:
+
+```matlab
+addpath("C:\code\github\Neurologger\Code");
+
+parent_folder = "D:\WILD\experiment01";
+result = WILD_PreProcess_Multi(parent_folder, ...
+    "MasterIndex", 1, ...
+    "OutputFolder", "D:\WILD\experiment01\merged");
+```
+
+For the standard multi-device animal folder layout, select the `subepochName` directory:
+
+```text
+RatID/
+  sessionName/
+    subepochName/       <-- select this folder
+      Device name 1/
+        datetime/
+          amplifier.dat
+          analogin.dat
+          CE_params.bin
+      Device name 2/
+        datetime/
+          amplifier.dat
+          analogin.dat
+          CE_params.bin
+```
+
+`WILD_PreProcess_Multi` recursively detects child folders that contain both `amplifier.dat` and `CE_params.bin`. The generated channel layout records the device folder name and recording datetime folder for each merged channel. You can also pass device folders directly:
+
+```matlab
+device_folders = {
+    "D:\WILD\experiment01\master"
+    "D:\WILD\experiment01\slave01"
+};
+
+result = WILD_PreProcess_Multi(device_folders, ...
+    "MasterIndex", 1, ...
+    "OutputFolder", "D:\WILD\experiment01\merged", ...
+    "MergeMethod", "channelMerger", ...
+    "Overwrite", true);
+```
+
+Expected merged outputs:
+
+```text
+first_device_recording_folder/
+  amplifier_merged.dat
+  analogin_merged.dat
+  amplifier_merged_mergeInfo.mat
+
+selected_output_folder/
+  multi_device_channel_merger_result.mat
+  multi_device_channel_layout.tsv
+```
+
+`WILD_channelMerger.m` currently expects exactly two logger recordings. It writes the merged binary next to the first detected device recording, while `WILD_PreProcess_Multi.m` also writes summary metadata into the selected output folder.
