@@ -93,7 +93,9 @@ nav:
       - USB Board: hardware/usb-board.md
       - Mechanical: hardware/mechanical.md
       - Power: hardware/power.md
-  - Fabrication: fabrication.md
+  - Fabrication:
+      - Overview: fabrication.md
+      - Soldering and Rework SOP: fabrication/soldering-rework.md
   - Software:
       - software/index.md
       - Acquisition: software/acquisition.md

@@ -2,6 +2,8 @@
 
 Board packages support ordering, assembly, and inspection for WILD hardware revisions.
 
+For day-to-day bench work after PCBA delivery, use the detailed [WILD soldering and rework SOP](fabrication/soldering-rework.md). It covers microscope assembly, double-sided fixturing, hot-air rework, STM32 QFN replacement, Intan BGA reballing, and Omnetics connector hand soldering.
+
 ## Fabrication Files
 
 | Board | Files |
@@ -55,14 +57,14 @@ Some WILD components may need advance ordering or manual handling:
 | --- | --- |
 | BMX160 IMU | This part is obsolete. BMI270 is a possible 6-axis replacement candidate, but the public WILD driver path is not developed yet. Do not substitute it unless the release image explicitly supports the replacement. |
 | HJ580 BLE module | Confirm availability directly with HJ-SIP. Validated builds should use the HJ580 module firmware version documented for WILD, currently firmware version 20220507. |
-| Omnetics A79025 | This 64-channel probe connector has a high failure rate during standard reflow. Prefer manual soldering with an alignment fixture, then inspect alignment, solder bridges, and continuity under magnification. |
+| Omnetics A79025 | This high-density Omnetics probe connector has a high failure rate during standard reflow. Prefer manual soldering with an alignment fixture, then inspect alignment, solder bridges, and continuity under magnification. The detailed connector workflow is documented in the [WILD soldering and rework SOP](fabrication/soldering-rework.md). |
 
 ## Post-Assembly Bring-Up
 
 Prepare a bench cable before applying power to a newly assembled WILD device.
 
 1. Solder the WILD 4-pin JST-SH 1.0 mm cable according to the connector illustration in [Hardware Setup](getting-started/hardware-setup.md).
-2. Pre-crimped JST-SH 1.0 mm wire leads or equivalent lab-qualified leads can be used for cable preparation after verifying polarity and pin order.
+2. Pre-crimped JST-SH 1.0 mm wire leads or equivalent qualified leads can be used for cable preparation after verifying polarity and pin order.
 3. Build a 4-pin USB power/programming cable by soldering the JST-SH lead to a USB-A connector breakout or equivalent bench-supply adapter. Keep the cable labeled and reuse it only after continuity checks.
 4. Place a USB power meter between the PC or USB supply and the 4-pin cable.
 5. Connect the WILD device for the first time and check the current before programming. Current below 10 mA is the expected first-pass check for no obvious short circuit; disconnect immediately if the current is higher than expected or unstable.
