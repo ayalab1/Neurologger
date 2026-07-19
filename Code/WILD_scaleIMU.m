@@ -35,14 +35,13 @@ if strcmp(type,'9axis')
 
     end
     if nargout>2 %perform  sensor fusion
+        if exist('ahrsfilter','file') == 0
+            error('WILD:MissingSensorFusionToolbox', ...
+                ['ahrsfilter is unavailable. IMU sensor fusion cannot be processed. ', ...
+                'Install Sensor Fusion and Tracking Toolbox or Navigation Toolbox to compute orientation.']);
+        end
         fusionData.imu = imu;
         fusionData.fs = fs;
-        if exist('ahrsfilter','file') == 0
-            warning('WILD:MissingSensorFusionToolbox', ...
-                ['ahrsfilter is unavailable. Skipping IMU sensor fusion. ', ...
-                'Install Sensor Fusion and Tracking Toolbox or Navigation Toolbox to compute orientation.']);
-            return;
-        end
         disp('Running sensor fusion...')
         % kF=imufilter('SampleRate',fs);
         % quaternionData  = kF(accelData,gyroData);

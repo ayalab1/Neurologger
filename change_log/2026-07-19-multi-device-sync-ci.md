@@ -4,7 +4,7 @@
 
 - Date: 2026-07-19
 - Base commit at verification: `d8c71ea2887f97fcdfafaec4d67bba765cc7eaaa`
-- Status: uncommitted at the time this log was written
+- Status: pushed as `284ff45`; follow-up IMU fallback tightening is uncommitted at the time this log was updated
 - Implementation plan: [../implementation_plan/2026-07-19-multi-device-sync-ci.md](../implementation_plan/2026-07-19-multi-device-sync-ci.md)
 
 ## What changed
@@ -19,11 +19,12 @@
 - Made the legacy two-logger alignment window use the existing `InitialStartSeconds`, `InitialDurationSeconds`, `InitialMaxLagSeconds`, `ChunkSeconds`, and `ChunkMaxLagSeconds` options while preserving the default values.
 - Added `Code/WILD_generate_pc_time.py` for generating `pc_time.dat` from packed WILD/CE analog PC-time lanes, including robust fit diagnostics and optional summary plot output.
 - Added `Code/WILD_preprocess_gui/wild_preprocess_gui.py`, a PySide6 GUI that discovers WILD recording folders, lets the user select master/slave recordings, runs ready checks, launches MATLAB multi-logger merge, generates master `pc_time.dat`, and records QC metrics.
-- Updated `Code/WILD_scaleIMU.m` so missing `ahrsfilter` does not fail IMU scaling; it now returns scaled IMU metadata and warns when sensor fusion is unavailable.
+- Updated `Code/WILD_scaleIMU.m` so missing `ahrsfilter` fails explicitly when sensor fusion is requested; it raises `WILD:MissingSensorFusionToolbox` instead of returning partial fallback `fusionData`.
 - Normalized the final newline in `Code/WILD_processIMU.m`.
 - Updated `.gitignore` to exclude local test data, caches, agent notes, Obsidian files, and local GUI QC artifacts.
 - Added CI workflow `.github/workflows/ci.yml` with MATLAB unit tests and Python syntax smoke checks.
 - Added `tests/WILDChannelMergerLegacyTest.m`, which creates temporary synthetic WILD-like recordings and verifies the legacy two-file merge output sizes and near-zero offset.
+- Added `tests/WILDScaleIMUTest.m`, which verifies that requested sensor fusion either returns real fusion fields when `ahrsfilter` is available or raises `WILD:MissingSensorFusionToolbox` when it is unavailable.
 - Added repository documentation indexes under `implementation_plan/` and `change_log/`.
 
 ## Why
@@ -38,13 +39,16 @@ Ran:
 git diff --check
 python -m py_compile Code\WILD_generate_pc_time.py Code\WILD_preprocess_gui\wild_preprocess_gui.py
 matlab -batch "addpath('Code'); results = runtests('tests'); assertSuccess(results);"
+matlab -batch "addpath('Code'); raw=zeros(32,9); [~,~,fusionData]=WILD_scaleIMU(raw,100,0,0); assert(isfield(fusionData,'quaternion')); assert(isfield(fusionData,'orientation'));"
 ```
 
 Results:
 
 - `git diff --check`: passed
 - Python syntax smoke check: passed
-- MATLAB unit test: passed; `WILDChannelMergerLegacyTest` generated synthetic two-logger data, merged it through `WILD_channelMerger`, and verified expected merged amplifier/analog file sizes and offset
+- MATLAB unit tests: passed; `WILDChannelMergerLegacyTest` generated synthetic two-logger data, and `WILDScaleIMUTest` verified the available real-fusion path locally
+- CI's Signal Processing Toolbox-only job is expected to exercise the missing-`ahrsfilter` fail-fast path
+- Local `ahrsfilter`-available sensor-fusion smoke check passed and returned `quaternion` and `orientation`
 
 ## Known limitations and next steps
 

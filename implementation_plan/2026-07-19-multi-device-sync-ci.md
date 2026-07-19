@@ -73,3 +73,7 @@ matlab -batch "addpath('Code'); results = runtests('tests'); assertSuccess(resul
 - Do not redesign the multi-logger sync/merge algorithm.
 - Do not commit local large test data under `test_data/`.
 - Do not change notebook or public analysis APIs unless the verification exposes a direct need.
+
+## Continuation: no fallback for unavailable IMU fusion
+
+After review, the `ahrsfilter` fallback in `Code/WILD_scaleIMU.m` should be tightened because it can make unavailable sensor-fusion processing look partially successful. Update `WILD_scaleIMU` so requesting the third output still means orientation/speed sensor fusion is required. If `ahrsfilter` is unavailable, raise `WILD:MissingSensorFusionToolbox` instead of returning partial `fusionData`. Add a MATLAB unit test that verifies this fail-fast behavior in environments without `ahrsfilter`.
