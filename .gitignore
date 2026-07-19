@@ -8,3 +8,16 @@ Code/WildWinUsbProbe/bin/
 Code/WildWinUsbProbe/obj/
 Code/WildWinUsbProbe/*.log
 Code/wild_flash_*.bin
+test_data/*
+__pycache__/
+*.pyc
+AGENTS.md
+.obsidian/*
+Code/WILD_preprocess_gui/*.local.md
+Code/WILD_preprocess_gui/*.local.json
+Code/WILD_preprocess_gui/*.local.mat
+Code/WILD_preprocess_gui/*.local.tsv
+Code/WILD_preprocess_gui/*.local.png
+Code/WILD_preprocess_gui/*.local*.mat
+Code/WILD_preprocess_gui/*.local*.tsv
+Code/WILD_preprocess_gui/*.local*.png
