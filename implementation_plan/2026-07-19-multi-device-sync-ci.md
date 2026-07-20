@@ -77,3 +77,9 @@ matlab -batch "addpath('Code'); results = runtests('tests'); assertSuccess(resul
 ## Continuation: no fallback for unavailable IMU fusion
 
 After review, the `ahrsfilter` fallback in `Code/WILD_scaleIMU.m` should be tightened because it can make unavailable sensor-fusion processing look partially successful. Update `WILD_scaleIMU` so requesting the third output still means orientation/speed sensor fusion is required. If `ahrsfilter` is unavailable, raise `WILD:MissingSensorFusionToolbox` instead of returning partial `fusionData`. Add a MATLAB unit test that verifies this fail-fast behavior in environments without `ahrsfilter`.
+
+## Continuation: pass channel merger output options from multi preprocess
+
+Code review found that `Code/WILD_PreProcess_Multi.m` creates and reports `opts.OutputFolder`, but its default `channelMerger` path calls `WILD_channelMerger` without forwarding `OutputFolder` or `OutputPrefix`. For multi-logger calls that route through `WILD_channelMerger`'s QC/merge path, that can make stream/QC outputs land outside `result.outputFolder`.
+
+Update the `WILD_PreProcess_Multi` delegation so it forwards the selected `MasterIndex`, `OutputFolder`, `OutputPrefix`, and existing chunk-duration setting to `WILD_channelMerger`. Add a focused MATLAB unit test that stubs `WILD_channelMerger` and verifies the wrapper passes those options without running a full binary merge.
