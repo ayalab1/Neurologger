@@ -40,8 +40,8 @@ PACKED_PC_MS_MASK = (1 << 20) - 1
 PACKED_PC_DELAY_SHIFT = 20
 PACKED_PC_DELAY_MASK = (1 << 12) - 1
 PACKED_PC_MOD_MS = 1 << 20
-CE_PARAMS_DATE_OFFSET = 336
-CE_PARAMS_TIME_OFFSET = 356
+CE_PARAMS_DATE_OFFSET = 332
+CE_PARAMS_TIME_OFFSET = 336
 CE_PARAMS_DATE_SIZE = 4
 CE_PARAMS_TIME_SIZE = 20
 ROBUST_MODEL_MAX_SEED_POINTS = 48
@@ -251,11 +251,14 @@ def read_ce_params_hint(record_dir: Path) -> CeParamsHint:
     ephys_rate = u32(0)
     sampling_rate_0 = u32(40)
     sampling_rate_misc = u32(52)
+    misc_ratio = data[320] if len(data) > 320 else 0
 
     if ephys_rate <= 0:
         ephys_rate = sampling_rate_0
     if ephys_rate <= 0:
         ephys_rate = None
+    if sampling_rate_misc <= 0 and ephys_rate is not None and misc_ratio > 0:
+        sampling_rate_misc = int(round(ephys_rate / misc_ratio))
     if sampling_rate_misc <= 0:
         sampling_rate_misc = None
     recording_start_ms = decode_ce_params_recording_start_ms(data)
