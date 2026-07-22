@@ -56,7 +56,7 @@ Some WILD components may need advance ordering or manual handling:
 | Component | Manufacturing note |
 | --- | --- |
 | BMX160 IMU | This part is obsolete. BMI270 is a possible 6-axis replacement candidate, but the public WILD driver path is not developed yet. Do not substitute it unless the release image explicitly supports the replacement. |
-| HJ580 BLE module | Confirm availability directly with HJ-SIP. Validated builds should use the HJ580 module firmware version documented for WILD, currently firmware version 20220507. |
+| HJ580 BLE module | Confirm availability directly with HJ-SIP. The HJ-580XP-UART model can also be ordered directly from DigiKey: [HJ-580XP-UART](https://www.digikey.com/en/products/detail/hjsip/HJ-580XP-UART/29274934). Validated builds should use the HJ580 module firmware version documented for WILD, currently firmware version 20220507. |
 | Omnetics A79025 | This high-density Omnetics probe connector has a high failure rate during standard reflow. Prefer manual soldering with an alignment fixture, then inspect alignment, solder bridges, and continuity under magnification. The detailed connector workflow is documented in the [WILD soldering and rework SOP](fabrication/soldering-rework.md). |
 
 ## Post-Assembly Bring-Up
