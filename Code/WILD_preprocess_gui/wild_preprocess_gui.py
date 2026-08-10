@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""WILD preprocessing GUI MVP.
+"""WILD preprocessing GUI.
 
-The GUI intentionally orchestrates the existing repository tools instead of
-rewriting the WILD preprocessing algorithms. Session-level outputs such as
-`pc_time.dat` are written to the selected WILD subepoch/recording folder.
+The UI remains a thin process orchestrator. Multi-device synchronization uses
+the Python backend, with the legacy MATLAB backend available through
+``WILD_SYNC_BACKEND=matlab`` during migration.
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ import json
 import os
 import re
 import struct
-import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -22,7 +22,14 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CODE_ROOT = REPO_ROOT / "Code"
+if str(CODE_ROOT) not in sys.path:
+    sys.path.insert(0, str(CODE_ROOT))
+
+from wild_preprocess.pc_time import align_pc_time_file
+
 PC_TIME_SCRIPT = CODE_ROOT / "WILD_generate_pc_time.py"
+PYTHON_BACKEND_WORKER = CODE_ROOT / "wild_preprocess" / "worker.py"
+SYNC_BACKEND = os.environ.get("WILD_SYNC_BACKEND", "python").strip().lower()
 DAY_MS = 24 * 60 * 60 * 1000
 
 
@@ -113,6 +120,14 @@ def _file_size(path: Path) -> int | None:
         return None
 
 
+def _read_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def _pc_time_status(recording: RecordingInfo) -> str:
     if not recording.pc_time_exists:
         return "missing"
@@ -138,7 +153,31 @@ def basepath_sync_qc_path(basepath: Path) -> Path:
 
 
 def pc_time_valid_for_recording(path: Path, recording: RecordingInfo) -> bool:
-    expected = recording.expected_time_bytes()
+    merge_info = path.parent / "wild_multilogger_mergeInfo.json"
+    merged_time = path.parent / "time.dat"
+    if merge_info.exists() and merged_time.exists():
+        expected = _file_size(merged_time)
+        merge_payload = _read_json_object(merge_info)
+        if merge_payload and merge_payload.get("run_id"):
+            pc_payload = _read_json_object(basepath_pc_time_qc_path(path.parent))
+            if not pc_payload or pc_payload.get("merge_run_id") != merge_payload["run_id"]:
+                return False
+            if pc_payload.get("status") != "ok" or not pc_payload.get(
+                "aligned_to_merge", False
+            ):
+                return False
+            try:
+                provenance_matches = (
+                    int(pc_payload["common_start_master_sample"])
+                    == int(merge_payload["common_start_master_sample"])
+                    and int(pc_payload["n_samples"]) == int(merge_payload["n_samples"])
+                )
+            except (KeyError, TypeError, ValueError):
+                return False
+            if not provenance_matches:
+                return False
+    else:
+        expected = recording.expected_time_bytes()
     return expected is not None and path.exists() and _file_size(path) == expected
 
 
@@ -359,10 +398,19 @@ def preflight_checks(recordings: list[RecordingInfo], basepath: Path | None = No
         checks.append(("WARN" if spread > 10 else "OK", "duration spread", f"{spread:.3f} sec"))
     if len(selected) >= 2:
         sync_qc_path = basepath_sync_qc_path(basepath) if basepath is not None else Path("wild_multilogger_sync_qc.mat")
+        sync_status = "OK" if sync_qc_path.exists() else "WARN"
+        sync_detail = f"{'found' if sync_qc_path.exists() else 'not run yet'}: {sync_qc_path}"
+        if basepath is not None:
+            qc_payload = _read_json_object(basepath / "wild_multilogger_sync_qc.json")
+            merge_payload = _read_json_object(basepath / "wild_multilogger_mergeInfo.json")
+            if qc_payload and merge_payload and qc_payload.get("run_id") and merge_payload.get("run_id"):
+                if qc_payload["run_id"] != merge_payload["run_id"]:
+                    sync_status = "WARN"
+                    sync_detail = "QC and merged outputs are from different runs; rerun synchronization"
         checks.append((
-            "OK" if sync_qc_path.exists() else "WARN",
+            sync_status,
             "logger sync QC",
-            f"{'found' if sync_qc_path.exists() else 'not run yet'}: {sync_qc_path}",
+            sync_detail,
         ))
     else:
         checks.append((
@@ -433,7 +481,9 @@ def main() -> int:
             self.recordings: list[RecordingInfo] = []
             self.basepath = Path.cwd()
             self._pc_time_process: QProcess | None = None
-            self._matlab_process: QProcess | None = None
+            self._backend_process: QProcess | None = None
+            self._backend_job_path: Path | None = None
+            self._pc_time_raw_path: Path | None = None
             self._pc_time_stdout = ""
             self._continue_after_pc_time = False
             self._continue_after_sync_qc = False
@@ -835,6 +885,9 @@ def main() -> int:
             self._refresh_preview()
 
         def _run_selected_steps(self) -> None:
+            if self._backend_process is not None or self._pc_time_process is not None:
+                self._append_log("Blocked: a preprocessing process is already running.")
+                return
             self._run_preflight()
             selected = self._selected_recordings_for_run()
             if has_ready_check_failure(self.recordings, self.basepath):
@@ -843,10 +896,16 @@ def main() -> int:
             if not selected:
                 self._append_log("Blocked: no selected recordings.")
                 return
-            self._continue_after_pc_time = len(selected) == 2
-            self._continue_after_sync_qc = True
+            self._continue_after_pc_time = len(selected) == 2 and SYNC_BACKEND == "matlab"
+            # The Python worker owns native PC-time generation.  Only the
+            # explicit MATLAB fallback continues into the legacy script.
+            self._continue_after_sync_qc = SYNC_BACKEND == "matlab"
             lfp_text = " with LFP requested" if self.generate_lfp.isChecked() else ""
-            self._append_log("Run pipeline: logger synchronization check, master pc_time.dat generation, then 2-logger merge only when exactly 2 loggers are selected" + lfp_text + ".")
+            if SYNC_BACKEND == "matlab":
+                pipeline_text = "logger synchronization check, master pc_time.dat generation, then legacy 2-logger merge"
+            else:
+                pipeline_text = "Python logger synchronization, merge, post-merge QC, and native master pc_time.dat generation"
+            self._append_log("Run pipeline: " + pipeline_text + lfp_text + ".")
             self._set_progress("Starting", 0)
             if len(selected) >= 2:
                 self._start_logger_sync_qc()
@@ -856,7 +915,7 @@ def main() -> int:
         def _run_after_pc_time(self) -> None:
             self._continue_after_pc_time = False
             selected = self._selected_recordings_for_run()
-            if len(selected) == 2:
+            if len(selected) == 2 and SYNC_BACKEND == "matlab":
                 self._start_documented_matlab_workflow()
             elif len(selected) > 2:
                 if self.generate_lfp.isChecked():
@@ -918,13 +977,13 @@ def main() -> int:
             self._append_log(f"  master: {selected[master_index - 1].device_id}/{selected[master_index - 1].recording_name}")
             self._append_log(f"  output: {self.basepath}")
             process = QProcess(self)
-            self._matlab_process = process
+            self._backend_process = process
             process.setProgram(command[0])
             process.setArguments(command[1:])
             process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
             process.readyReadStandardOutput.connect(lambda: self._read_process_output(process))
-            process.errorOccurred.connect(lambda error: self._append_log(f"MATLAB process error: {error}"))
-            process.finished.connect(lambda code, _status: self._matlab_finished(code))
+            process.errorOccurred.connect(self._backend_process_error)
+            process.finished.connect(lambda code, _status: self._backend_finished(code))
             process.start()
 
         def _start_logger_sync_qc(self) -> None:
@@ -939,6 +998,9 @@ def main() -> int:
                 self._continue_after_sync_qc = False
                 return
             master_index = next(idx for idx, rec in enumerate(selected, start=1) if rec.role == "master")
+            if SYNC_BACKEND != "matlab":
+                self._start_python_sync_backend(selected, master_index)
+                return
             code_root = str(CODE_ROOT).replace("'", "''")
             out_folder = str(self.basepath).replace("'", "''")
             folders = "; ".join([f"'{str(rec.folder).replace(chr(39), chr(39)+chr(39))}'" for rec in selected])
@@ -966,24 +1028,119 @@ def main() -> int:
                     self._append_log(f"  slave:  {rec.device_id}/{rec.recording_name}")
             self._append_log(f"  output: {self.basepath}")
             process = QProcess(self)
-            self._matlab_process = process
+            self._backend_process = process
             process.setProgram(command[0])
             process.setArguments(command[1:])
             process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
             process.readyReadStandardOutput.connect(lambda: self._read_process_output(process))
-            process.errorOccurred.connect(lambda error: self._append_log(f"MATLAB process error: {error}"))
-            process.finished.connect(lambda code, _status: self._matlab_finished(code))
+            process.errorOccurred.connect(self._backend_process_error)
+            process.finished.connect(lambda code, _status: self._backend_finished(code))
             process.start()
 
-        def _matlab_finished(self, return_code: int) -> None:
-            self._append_log(f"MATLAB finished with exit code {return_code}.")
-            self._set_progress("MATLAB finished" if return_code == 0 else "MATLAB failed", 100 if return_code == 0 else self.progress_bar.value())
+        def _start_python_sync_backend(self, selected: list[RecordingInfo], master_index: int) -> None:
+            if not PYTHON_BACKEND_WORKER.exists():
+                self._continue_after_sync_qc = False
+                QMessageBox.critical(self, "Python backend unavailable", f"Missing backend worker:\n{PYTHON_BACKEND_WORKER}")
+                return
+            job = {
+                "schema_version": 2,
+                "device_folders": [str(rec.folder) for rec in selected],
+                "probe_indices": [int(rec.probe_index) for rec in selected],
+                "master_index": master_index,
+                "output_folder": str(self.basepath),
+                "overwrite": self.overwrite_outputs.isChecked(),
+                "merge": True,
+                "sync_options": {"chunk_seconds": 5.0},
+                "pc_time_options": {},
+            }
+            handle = tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".json",
+                prefix="wild_preprocess_job_",
+                encoding="utf-8",
+                delete=False,
+            )
+            try:
+                json.dump(job, handle, indent=2)
+            finally:
+                handle.close()
+            self._backend_job_path = Path(handle.name)
+            process = QProcess(self)
+            self._backend_process = process
+            process.setProgram(sys.executable)
+            process.setArguments([str(PYTHON_BACKEND_WORKER), str(self._backend_job_path)])
+            process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+            process.readyReadStandardOutput.connect(lambda: self._read_process_output(process))
+            process.errorOccurred.connect(self._backend_process_error)
+            process.finished.connect(lambda code, _status: self._backend_finished(code))
+            self._append_log("Starting Python multi-logger synchronization backend.")
+            self._append_log(f"  master: {selected[master_index - 1].device_id}/{selected[master_index - 1].recording_name}")
+            for idx, rec in enumerate(selected, start=1):
+                if idx != master_index:
+                    self._append_log(f"  slave:  {rec.device_id}/{rec.recording_name}")
+            self._append_log(f"  output: {self.basepath}")
+            if self.generate_lfp.isChecked():
+                self._append_log("LFP generation remains deferred during the Python synchronization backend migration.")
+            process.start()
+
+        def _backend_process_error(self, error: QProcess.ProcessError) -> None:
+            self._append_log(f"Preprocessing backend process error: {error}")
+            if error == QProcess.ProcessError.FailedToStart and self._backend_process is not None:
+                self._backend_finished(-1)
+
+        def _backend_finished(self, return_code: int) -> None:
+            is_matlab = SYNC_BACKEND == "matlab"
+            backend_label = "MATLAB" if is_matlab else "Python backend"
+            self._append_log(f"{backend_label} finished with exit code {return_code}.")
+            self._set_progress(
+                (
+                    f"{backend_label} finished"
+                    if return_code == 0
+                    else f"{backend_label} merge-only" if not is_matlab and return_code == 3 else f"{backend_label} failed"
+                ),
+                100 if return_code in {0, 3} else self.progress_bar.value(),
+            )
             if return_code == 0:
                 for rec in self._selected_recordings_for_run():
                     rec.sync_qc = "QC done; review outputs"
-            self._matlab_process = None
+            self._backend_process = None
+            if self._backend_job_path is not None:
+                try:
+                    self._backend_job_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    self._append_log(f"Could not remove temporary backend job: {exc}")
+                self._backend_job_path = None
             self._refresh_recording_table()
             self._run_preflight()
+            # A Python worker is the complete multi-device pipeline.  Keep
+            # this branch ahead of the legacy continuation so an accidental
+            # continuation flag can never launch WILD_generate_pc_time.py.
+            if not is_matlab:
+                self._continue_after_sync_qc = False
+                self._continue_after_pc_time = False
+                manifest_path = self.basepath / "wild_preprocess_run.json"
+                if manifest_path.is_file():
+                    try:
+                        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                        self._append_log(
+                            "Python manifest: "
+                            f"{manifest.get('overall_status', 'unknown')} "
+                            f"(sync={manifest.get('sync_status', 'unknown')}, "
+                            f"merge={manifest.get('merge_status', 'unknown')}, "
+                            f"pc_time={manifest.get('pc_time_status', 'unknown')})."
+                        )
+                    except (OSError, json.JSONDecodeError) as exc:
+                        self._append_log(f"Could not read Python run manifest: {exc}")
+                if return_code == 0:
+                    if self.generate_lfp.isChecked():
+                        self._append_log("Python run complete; LFP generation remains deferred.")
+                    else:
+                        self._append_log("Python run complete: merged streams and native pc_time.dat are ready for review.")
+                elif return_code == 3:
+                    self._append_log("Python merge completed, but native PC-time QC failed; pc_time.dat was not published.")
+                else:
+                    self._append_log("Python run failed before publication; existing successful outputs were preserved.")
+                return
             if self._continue_after_sync_qc:
                 self._continue_after_sync_qc = False
                 if return_code == 0:
@@ -1016,6 +1173,9 @@ def main() -> int:
             return masters[0] if len(masters) == 1 else None
 
         def _generate_master_pc_time(self) -> None:
+            if self._pc_time_process is not None:
+                self._append_log("Blocked: pc_time generation is already running.")
+                return
             master = self._master_recording()
             if master is None:
                 self._continue_after_pc_time = False
@@ -1027,7 +1187,14 @@ def main() -> int:
                 return
             output_path = basepath_pc_time_path(self.basepath)
             summary_path = basepath_pc_time_summary_path(self.basepath)
-            command = [sys.executable, str(PC_TIME_SCRIPT), str(master.folder), "-o", str(output_path)]
+            generator_output = output_path
+            if SYNC_BACKEND != "matlab" and (self.basepath / "wild_multilogger_mergeInfo.json").exists():
+                handle = tempfile.NamedTemporaryFile(prefix="wild_raw_pc_time_", suffix=".dat", delete=False)
+                handle.close()
+                self._pc_time_raw_path = Path(handle.name)
+                self._pc_time_raw_path.unlink(missing_ok=True)
+                generator_output = self._pc_time_raw_path
+            command = [sys.executable, str(PC_TIME_SCRIPT), str(master.folder), "-o", str(generator_output)]
             command.extend(["--summary-plot", str(summary_path)])
             if output_path.exists() and not self.overwrite_outputs.isChecked():
                 answer = QMessageBox.question(self, "pc_time.dat exists", f"{output_path} already exists. Regenerate it?")
@@ -1048,9 +1215,14 @@ def main() -> int:
             process.setArguments(command[1:])
             process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
             process.readyReadStandardOutput.connect(lambda: self._read_pc_time_output(process))
-            process.errorOccurred.connect(lambda error: self._append_log(f"pc_time process error: {error}"))
+            process.errorOccurred.connect(lambda error: self._pc_time_process_error(master, error))
             process.finished.connect(lambda code, _status: self._pc_time_finished(master, code))
             process.start()
+
+        def _pc_time_process_error(self, master: RecordingInfo, error: QProcess.ProcessError) -> None:
+            self._append_log(f"pc_time process error: {error}")
+            if error == QProcess.ProcessError.FailedToStart and self._pc_time_process is not None:
+                self._pc_time_finished(master, -1)
 
         def _read_pc_time_output(self, process: QProcess) -> None:
             chunk = bytes(process.readAllStandardOutput()).decode(errors="replace")
@@ -1067,14 +1239,53 @@ def main() -> int:
         def _pc_time_finished(self, master: RecordingInfo, return_code: int) -> None:
             metrics = parse_pc_time_stdout(self._pc_time_stdout)
             status, detail = classify_pc_time(metrics, return_code)
+            output_path = basepath_pc_time_path(self.basepath)
+            aligned_to_merge = False
+            if return_code == 0 and self._pc_time_raw_path is not None:
+                try:
+                    merge_info = json.loads((self.basepath / "wild_multilogger_mergeInfo.json").read_text(encoding="utf-8"))
+                    align_pc_time_file(
+                        self._pc_time_raw_path,
+                        output_path,
+                        common_start_master_sample=int(merge_info["common_start_master_sample"]),
+                        n_samples=int(merge_info["n_samples"]),
+                    )
+                    if _file_size(output_path) != _file_size(self.basepath / "time.dat"):
+                        raise ValueError("aligned pc_time.dat does not match merged time.dat length")
+                    detail += "; sliced to merged common interval"
+                    aligned_to_merge = True
+                except Exception as exc:
+                    return_code = 1
+                    status = "failed"
+                    detail = f"failed to align pc_time to merged interval: {exc}"
+                finally:
+                    self._pc_time_raw_path.unlink(missing_ok=True)
+                    self._pc_time_raw_path = None
+            elif self._pc_time_raw_path is not None:
+                self._pc_time_raw_path.unlink(missing_ok=True)
+                self._pc_time_raw_path = None
             master.pc_time_metrics = metrics
             master.pc_time_status = status
             master.sync_qc = detail
-            output_path = basepath_pc_time_path(self.basepath)
             master.pc_time_exists = output_path.exists()
-            master.pc_time_valid = pc_time_valid_for_recording(output_path, master)
             qc_path = basepath_pc_time_qc_path(self.basepath)
-            qc_path.write_text(json.dumps({master.device_id: metrics, "status": status, "detail": detail}, indent=2), encoding="utf-8")
+            pc_payload: dict[str, Any] = {
+                master.device_id: metrics,
+                "status": status,
+                "detail": detail,
+            }
+            merge_payload = _read_json_object(self.basepath / "wild_multilogger_mergeInfo.json")
+            if merge_payload and merge_payload.get("run_id"):
+                pc_payload.update(
+                    {
+                        "merge_run_id": merge_payload["run_id"],
+                        "aligned_to_merge": aligned_to_merge,
+                        "common_start_master_sample": merge_payload.get("common_start_master_sample"),
+                        "n_samples": merge_payload.get("n_samples"),
+                    }
+                )
+            qc_path.write_text(json.dumps(pc_payload, indent=2), encoding="utf-8")
+            master.pc_time_valid = pc_time_valid_for_recording(output_path, master)
             self._append_log(f"pc_time finished for {master.device_id}: {status} ({detail})")
             self._append_log(f"Saved pc_time QC: {qc_path}")
             self._refresh_recording_table()
@@ -1087,7 +1298,7 @@ def main() -> int:
                 else:
                     self._continue_after_pc_time = False
                     self._append_log("Skipping downstream steps because pc_time generation failed.")
-            elif return_code == 0:
+            elif return_code == 0 and master.pc_time_valid:
                 selected_count = len(self._selected_recordings_for_run())
                 if selected_count > 2:
                     if self.generate_lfp.isChecked():
@@ -1097,14 +1308,16 @@ def main() -> int:
                 else:
                     self._append_log("Run complete.")
                 self._set_progress("Complete", 100)
+            elif return_code == 0:
+                self._append_log("pc_time requires review; the merged session was not marked complete.")
 
         def _force_stop(self) -> None:
             if self._pc_time_process is not None:
                 self._pc_time_process.kill()
                 self._append_log("Stopped running pc_time process.")
-            if self._matlab_process is not None:
-                self._matlab_process.kill()
-                self._append_log("Stopped running MATLAB process.")
+            if self._backend_process is not None:
+                self._backend_process.kill()
+                self._append_log("Stopped running preprocessing backend.")
             self._set_progress("Stopped", self.progress_bar.value())
 
         def _set_progress(self, label: str, value: float) -> None:
