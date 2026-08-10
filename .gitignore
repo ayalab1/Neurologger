@@ -22,6 +22,6 @@ Code/WILD_preprocess_gui/*.local*.mat
 Code/WILD_preprocess_gui/*.local*.tsv
 Code/WILD_preprocess_gui/*.local*.png
 
-tests/
-change_log/
-implementation_plan/
+tests/*
+change_log/*
+implementation_plan/*
