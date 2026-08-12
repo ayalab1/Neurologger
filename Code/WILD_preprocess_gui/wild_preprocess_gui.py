@@ -128,6 +128,45 @@ def _read_json_object(path: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+def _write_json_object_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+        temporary = Path(handle.name)
+    temporary.replace(path)
+
+
+def _published_python_run_summary(manifest: dict[str, Any] | None) -> tuple[bool, str]:
+    """Classify the Python manifest without mistaking published WARN for failure."""
+
+    if not manifest:
+        return False, "run manifest unavailable"
+    overall = str(manifest.get("overall_status", "")).upper()
+    sync = str(manifest.get("sync_status", "")).upper()
+    merge = str(manifest.get("merge_status", "")).upper()
+    pc_time = str(manifest.get("pc_time_status", "")).upper()
+    if overall not in {"COMPLETE", "MERGE_ONLY"}:
+        return False, f"not published ({overall or 'unknown'})"
+    warning_components = [
+        name
+        for name, value in (("sync", sync), ("merge", merge), ("PC-time", pc_time))
+        if value == "WARN"
+    ]
+    if overall == "MERGE_ONLY" and "PC-time" not in warning_components:
+        warning_components.append("PC-time")
+    if warning_components:
+        return True, "published with warnings: " + ", ".join(warning_components)
+    return True, "published"
+
+
 def _pc_time_status(recording: RecordingInfo) -> str:
     if not recording.pc_time_exists:
         return "missing"
@@ -149,13 +188,39 @@ def basepath_pc_time_qc_path(basepath: Path) -> Path:
 
 
 def basepath_sync_qc_path(basepath: Path) -> Path:
-    return basepath / "wild_multilogger_sync_qc.mat"
+    if SYNC_BACKEND == "matlab":
+        return basepath / "wild_multilogger_sync_qc.mat"
+    return basepath / "wild_preprocess_run.json"
 
 
 def pc_time_valid_for_recording(path: Path, recording: RecordingInfo) -> bool:
+    run_manifest = path.parent / "wild_preprocess_run.json"
     merge_info = path.parent / "wild_multilogger_mergeInfo.json"
     merged_time = path.parent / "time.dat"
-    if merge_info.exists() and merged_time.exists():
+    if SYNC_BACKEND != "matlab" and run_manifest.exists() and merged_time.exists():
+        expected = _file_size(merged_time)
+        manifest = _read_json_object(run_manifest)
+        if not manifest:
+            return False
+        merge_payload = manifest.get("merge")
+        pc_payload = manifest.get("pc_time")
+        if not isinstance(merge_payload, dict) or not isinstance(pc_payload, dict):
+            return False
+        if pc_payload.get("merge_run_id") != manifest.get("run_id"):
+            return False
+        if pc_payload.get("status") != "ok" or not pc_payload.get("aligned_to_merge", False):
+            return False
+        try:
+            provenance_matches = (
+                int(pc_payload["common_start_master_sample"])
+                == int(merge_payload["common_start_master_sample"])
+                and int(pc_payload["n_samples"]) == int(merge_payload["n_samples"])
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+        if not provenance_matches:
+            return False
+    elif merge_info.exists() and merged_time.exists():
         expected = _file_size(merged_time)
         merge_payload = _read_json_object(merge_info)
         if merge_payload and merge_payload.get("run_id"):
@@ -400,13 +465,18 @@ def preflight_checks(recordings: list[RecordingInfo], basepath: Path | None = No
         sync_qc_path = basepath_sync_qc_path(basepath) if basepath is not None else Path("wild_multilogger_sync_qc.mat")
         sync_status = "OK" if sync_qc_path.exists() else "WARN"
         sync_detail = f"{'found' if sync_qc_path.exists() else 'not run yet'}: {sync_qc_path}"
-        if basepath is not None:
-            qc_payload = _read_json_object(basepath / "wild_multilogger_sync_qc.json")
-            merge_payload = _read_json_object(basepath / "wild_multilogger_mergeInfo.json")
-            if qc_payload and merge_payload and qc_payload.get("run_id") and merge_payload.get("run_id"):
-                if qc_payload["run_id"] != merge_payload["run_id"]:
-                    sync_status = "WARN"
-                    sync_detail = "QC and merged outputs are from different runs; rerun synchronization"
+        if basepath is not None and SYNC_BACKEND != "matlab":
+            manifest = _read_json_object(sync_qc_path)
+            if manifest:
+                recorded_status = str(manifest.get("sync_status", "WARN")).upper()
+                sync_status = recorded_status if recorded_status in {"OK", "WARN", "FAIL"} else "WARN"
+                sync_detail = (
+                    f"{manifest.get('overall_status', 'unknown')} run "
+                    f"{manifest.get('run_id', 'unknown')}: {sync_qc_path}"
+                )
+            elif sync_qc_path.exists():
+                sync_status = "WARN"
+                sync_detail = f"invalid run manifest; rerun synchronization: {sync_qc_path}"
         checks.append((
             sync_status,
             "logger sync QC",
@@ -1043,7 +1113,7 @@ def main() -> int:
                 QMessageBox.critical(self, "Python backend unavailable", f"Missing backend worker:\n{PYTHON_BACKEND_WORKER}")
                 return
             job = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "device_folders": [str(rec.folder) for rec in selected],
                 "probe_indices": [int(rec.probe_index) for rec in selected],
                 "master_index": master_index,
@@ -1119,6 +1189,7 @@ def main() -> int:
                 self._continue_after_sync_qc = False
                 self._continue_after_pc_time = False
                 manifest_path = self.basepath / "wild_preprocess_run.json"
+                manifest = None
                 if manifest_path.is_file():
                     try:
                         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1132,12 +1203,30 @@ def main() -> int:
                     except (OSError, json.JSONDecodeError) as exc:
                         self._append_log(f"Could not read Python run manifest: {exc}")
                 if return_code == 0:
-                    if self.generate_lfp.isChecked():
+                    published, publication_detail = _published_python_run_summary(manifest)
+                    if published:
+                        qc_text = (
+                            "Published with warnings; review valid_samples.dat and inspection figure"
+                            if "warnings" in publication_detail
+                            else "Published; review outputs"
+                        )
+                        for rec in self._selected_recordings_for_run():
+                            rec.sync_qc = qc_text
+                    if published and "warnings" in publication_detail:
+                        self._append_log(
+                            "Python run " + publication_detail + "; outputs remain available for review."
+                        )
+                    if manifest is not None and manifest.get("overall_status") == "MERGE_ONLY":
+                        self._append_log(
+                            "Python merge completed with a PC-time warning; "
+                            "merged neural streams remain available, but pc_time.dat was not published."
+                        )
+                    elif self.generate_lfp.isChecked():
                         self._append_log("Python run complete; LFP generation remains deferred.")
                     else:
                         self._append_log("Python run complete: merged streams and native pc_time.dat are ready for review.")
                 elif return_code == 3:
-                    self._append_log("Python merge completed, but native PC-time QC failed; pc_time.dat was not published.")
+                    self._append_log("Python merge completed with a PC-time warning; pc_time.dat was not published.")
                 else:
                     self._append_log("Python run failed before publication; existing successful outputs were preserved.")
                 return
@@ -1188,14 +1277,15 @@ def main() -> int:
             output_path = basepath_pc_time_path(self.basepath)
             summary_path = basepath_pc_time_summary_path(self.basepath)
             generator_output = output_path
-            if SYNC_BACKEND != "matlab" and (self.basepath / "wild_multilogger_mergeInfo.json").exists():
+            if SYNC_BACKEND != "matlab" and (self.basepath / "wild_preprocess_run.json").exists():
                 handle = tempfile.NamedTemporaryFile(prefix="wild_raw_pc_time_", suffix=".dat", delete=False)
                 handle.close()
                 self._pc_time_raw_path = Path(handle.name)
                 self._pc_time_raw_path.unlink(missing_ok=True)
                 generator_output = self._pc_time_raw_path
             command = [sys.executable, str(PC_TIME_SCRIPT), str(master.folder), "-o", str(generator_output)]
-            command.extend(["--summary-plot", str(summary_path)])
+            if SYNC_BACKEND == "matlab":
+                command.extend(["--summary-plot", str(summary_path)])
             if output_path.exists() and not self.overwrite_outputs.isChecked():
                 answer = QMessageBox.question(self, "pc_time.dat exists", f"{output_path} already exists. Regenerate it?")
                 if answer != QMessageBox.StandardButton.Yes:
@@ -1207,7 +1297,8 @@ def main() -> int:
             self._append_log("Starting master pc_time.dat generation.")
             self._append_log(f"  master: {master.device_id}/{master.recording_name}")
             self._append_log(f"  pc_time: {output_path}")
-            self._append_log(f"  summary: {summary_path}")
+            if SYNC_BACKEND == "matlab":
+                self._append_log(f"  summary: {summary_path}")
             process = QProcess(self)
             self._pc_time_process = process
             self._pc_time_stdout = ""
@@ -1241,9 +1332,13 @@ def main() -> int:
             status, detail = classify_pc_time(metrics, return_code)
             output_path = basepath_pc_time_path(self.basepath)
             aligned_to_merge = False
+            run_manifest_path = self.basepath / "wild_preprocess_run.json"
+            run_manifest = _read_json_object(run_manifest_path)
             if return_code == 0 and self._pc_time_raw_path is not None:
                 try:
-                    merge_info = json.loads((self.basepath / "wild_multilogger_mergeInfo.json").read_text(encoding="utf-8"))
+                    if not run_manifest or not isinstance(run_manifest.get("merge"), dict):
+                        raise ValueError("run manifest does not contain merge metadata")
+                    merge_info = run_manifest["merge"]
                     align_pc_time_file(
                         self._pc_time_raw_path,
                         output_path,
@@ -1267,14 +1362,17 @@ def main() -> int:
             master.pc_time_metrics = metrics
             master.pc_time_status = status
             master.sync_qc = detail
-            master.pc_time_exists = output_path.exists()
             qc_path = basepath_pc_time_qc_path(self.basepath)
             pc_payload: dict[str, Any] = {
                 master.device_id: metrics,
                 "status": status,
                 "detail": detail,
             }
-            merge_payload = _read_json_object(self.basepath / "wild_multilogger_mergeInfo.json")
+            merge_payload = (
+                run_manifest.get("merge")
+                if run_manifest and isinstance(run_manifest.get("merge"), dict)
+                else _read_json_object(self.basepath / "wild_multilogger_mergeInfo.json")
+            )
             if merge_payload and merge_payload.get("run_id"):
                 pc_payload.update(
                     {
@@ -1284,7 +1382,29 @@ def main() -> int:
                         "n_samples": merge_payload.get("n_samples"),
                     }
                 )
-            qc_path.write_text(json.dumps(pc_payload, indent=2), encoding="utf-8")
+            if SYNC_BACKEND != "matlab" and run_manifest:
+                pc_payload["merge_run_id"] = run_manifest.get("run_id")
+                run_manifest["pc_time"] = pc_payload
+                run_manifest["pc_time_status"] = "OK" if status == "ok" and aligned_to_merge else "WARN"
+                run_manifest["overall_status"] = (
+                    "COMPLETE" if run_manifest["pc_time_status"] == "OK" else "MERGE_ONLY"
+                )
+                if run_manifest["pc_time_status"] == "OK":
+                    run_manifest.setdefault("expected_output_bytes", {})["pc_time.dat"] = _file_size(output_path)
+                    managed = run_manifest.setdefault("managed_files", [])
+                    if "pc_time.dat" not in managed:
+                        managed.append("pc_time.dat")
+                else:
+                    output_path.unlink(missing_ok=True)
+                    run_manifest.setdefault("expected_output_bytes", {}).pop("pc_time.dat", None)
+                    managed = run_manifest.setdefault("managed_files", [])
+                    if "pc_time.dat" in managed:
+                        managed.remove("pc_time.dat")
+                _write_json_object_atomic(run_manifest_path, run_manifest)
+                qc_path = run_manifest_path
+            else:
+                _write_json_object_atomic(qc_path, pc_payload)
+            master.pc_time_exists = output_path.exists()
             master.pc_time_valid = pc_time_valid_for_recording(output_path, master)
             self._append_log(f"pc_time finished for {master.device_id}: {status} ({detail})")
             self._append_log(f"Saved pc_time QC: {qc_path}")
@@ -1293,7 +1413,7 @@ def main() -> int:
             self._run_preflight()
             self._pc_time_process = None
             if self._continue_after_pc_time:
-                if return_code == 0:
+                if return_code == 0 and master.pc_time_valid:
                     self._run_after_pc_time()
                 else:
                     self._continue_after_pc_time = False

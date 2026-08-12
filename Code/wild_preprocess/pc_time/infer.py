@@ -18,10 +18,9 @@ ROBUST_RESIDUAL_MAD_SCALE = 6.0 * 1.4826
 class PcTimeModel:
     """One affine fit plus residuals for every decoded packed update.
 
-    ``keep_mask`` identifies observations used for the robust affine fit.  It
-    must not be used to discard the ordered evidence when validating a clock
-    step or a rate-regime change: ``residual_ms`` and ``pc_unwrapped_ms``
-    always retain one value for every decoded update.
+    ``keep_mask`` identifies observations used for the robust affine fit.
+    ``residual_ms`` and ``pc_unwrapped_ms`` retain every decoded update so QC
+    can distinguish normal-cadence clock changes from corrupt update floods.
     """
 
     device_ms: np.ndarray

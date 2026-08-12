@@ -1,23 +1,32 @@
 from __future__ import annotations
 
-import csv
 import json
 import os
 import shutil
 import tempfile
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Callable
 
 import numpy as np
-from scipy.io import loadmat, savemat
 
 from ..binary_io import atomic_output_path, close_memmap, interleaved_memmap, replace_atomic
-from ..models import DeviceGap, Recording, SyncModel
+from ..models import (
+    ClassifiedInterval,
+    DeviceGap,
+    DeviceSourceStep,
+    DeviceSyncSegment,
+    DeviceTerminalSupport,
+    Recording,
+    SyncModel,
+)
+from .segments import map_canonical_positions, validate_segment_collection
 from ..version import SYNC_ALGORITHM_VERSION
 
 
 ProgressCallback = Callable[[str, float], None]
 StageCallback = Callable[[Path, dict[str, str]], None]
+TimingCallback = Callable[[str, str, int, int], None]
 ANALOG_FS = 1250.0
 EPHYS_SINC_HALF_WIDTH = 16
 EPHYS_SINC_KAISER_BETA = 8.6
@@ -63,53 +72,6 @@ def _previous_managed_names(output_folder: Path) -> set[str]:
     return _safe_managed_names(payload.get("managed_files"))
 
 
-def _mat_safe(value: object) -> object:
-    if value is None:
-        return float("nan")
-    if isinstance(value, dict):
-        return {str(key): _mat_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_mat_safe(item) for item in value]
-    return value
-
-
-def add_postmerge_validation_to_merge_mat(path: Path, validation: dict[str, object]) -> None:
-    """Add staged post-merge QC to the legacy-compatible merge MAT file."""
-
-    loaded = loadmat(path, simplify_cells=True)
-    payload = {key: value for key, value in loaded.items() if not key.startswith("__")}
-    merge_info = payload.get("mergeInfo", {})
-    if not isinstance(merge_info, dict):
-        merge_info = {"legacyMergeInfo": merge_info}
-    matlab_validation = _mat_safe(validation)
-    merge_info["postmergeValidation"] = matlab_validation
-    payload["mergeInfo"] = merge_info
-    payload["postmerge_validation"] = matlab_validation
-    savemat(path, payload, do_compression=True, long_field_names=True)
-
-
-def add_traceability_to_merge_mat(
-    path: Path,
-    *,
-    probe_indices: list[int],
-    recording_start_anchors: list[dict[str, object]],
-) -> None:
-    """Persist worker selection/anchor provenance in staged merge metadata."""
-
-    loaded = loadmat(path, simplify_cells=True)
-    payload = {key: value for key, value in loaded.items() if not key.startswith("__")}
-    merge_info = payload.get("mergeInfo", {})
-    if not isinstance(merge_info, dict):
-        merge_info = {"legacyMergeInfo": merge_info}
-    safe_anchors = _mat_safe(recording_start_anchors)
-    merge_info["probeIndices"] = np.asarray(probe_indices, dtype=np.int32)
-    merge_info["recordingStartAnchors"] = safe_anchors
-    payload["mergeInfo"] = merge_info
-    payload["probe_indices"] = np.asarray(probe_indices, dtype=np.int32)
-    payload["recording_start_anchors"] = safe_anchors
-    savemat(path, payload, do_compression=True, long_field_names=True)
-
-
 def _device_models(
     recordings: list[Recording], master_index: int, pair_models: dict[int, SyncModel]
 ) -> list[SyncModel]:
@@ -139,6 +101,68 @@ def _device_gap_map(device_gaps: list[DeviceGap]) -> dict[int, tuple[DeviceGap, 
     return {index: tuple(values) for index, values in mapped.items()}
 
 
+def _device_source_step_map(
+    source_steps: list[DeviceSourceStep],
+) -> dict[int, tuple[DeviceSourceStep, ...]]:
+    mapped: dict[int, list[DeviceSourceStep]] = {}
+    for step in sorted(source_steps, key=lambda item: (item.device_index, item.canonical_sample)):
+        mapped.setdefault(step.device_index - 1, []).append(step)
+    return {index: tuple(values) for index, values in mapped.items()}
+
+
+def _device_interval_map(
+    intervals: list[ClassifiedInterval],
+) -> dict[int, tuple[ClassifiedInterval, ...]]:
+    mapped: dict[int, list[ClassifiedInterval]] = {}
+    for interval in intervals:
+        if interval.action != "zero_fill":
+            continue
+        for device_index in interval.affected_device_indices:
+            mapped.setdefault(device_index - 1, []).append(interval)
+    return {
+        index: tuple(sorted(values, key=lambda item: item.canonical_start_sample))
+        for index, values in mapped.items()
+    }
+
+
+def _device_terminal_map(
+    supports: list[DeviceTerminalSupport],
+) -> dict[int, DeviceTerminalSupport]:
+    mapped: dict[int, DeviceTerminalSupport] = {}
+    for support in supports:
+        index = support.device_index - 1
+        previous = mapped.get(index)
+        if previous is None or support.supported_canonical_end_sample < previous.supported_canonical_end_sample:
+            mapped[index] = support
+    return mapped
+
+
+def _device_segment_map(
+    segments: list[DeviceSyncSegment],
+    *,
+    device_count: int,
+) -> dict[int, tuple[DeviceSyncSegment, ...]]:
+    grouped: dict[int, list[DeviceSyncSegment]] = {}
+    for segment in segments:
+        if segment.device_index > device_count:
+            raise ValueError(f"segment device index {segment.device_index} is outside recordings")
+        grouped.setdefault(segment.device_index - 1, []).append(segment)
+    return {
+        device_index: validate_segment_collection(
+            grouped.get(device_index, ()), device_index=device_index + 1
+        )
+        for device_index in range(device_count)
+    }
+
+
+def _validity_device_order(recordings: list[Recording], master_index: int) -> list[int]:
+    """Return source-device indices in the stable validity-channel order."""
+
+    if not 0 <= master_index < len(recordings):
+        raise ValueError(f"Invalid master index {master_index} for {len(recordings)} recordings")
+    return [master_index, *(index for index in range(len(recordings)) if index != master_index)]
+
+
 def _source_coordinates(
     model: SyncModel,
     canonical_positions: np.ndarray,
@@ -146,6 +170,9 @@ def _source_coordinates(
     *,
     fs: float,
     guard_samples: int = 0,
+    source_steps: tuple[DeviceSourceStep, ...] = (),
+    invalid_intervals: tuple[ClassifiedInterval, ...] = (),
+    terminal_support: DeviceTerminalSupport | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Map canonical positions to compressed device coordinates and validity."""
 
@@ -159,7 +186,47 @@ def _source_coordinates(
             (canonical_positions >= start - guard_samples)
             & (canonical_positions < end + guard_samples)
         )
+    for step in source_steps:
+        source += step.source_step_samples * (
+            canonical_positions >= step.canonical_sample
+        )
+    for interval in invalid_intervals:
+        expansion = guard_samples if interval.kind in {"missing", "duplicate_destination"} else 0
+        valid &= ~(
+            (canonical_positions >= interval.canonical_start_sample - expansion)
+            & (canonical_positions < interval.canonical_end_sample + expansion)
+        )
+    if terminal_support is not None:
+        valid &= canonical_positions < terminal_support.supported_canonical_end_sample
     return source, valid
+
+
+def _apply_neural_validity_exclusions(
+    valid: np.ndarray,
+    canonical_positions: np.ndarray,
+    *,
+    gaps: tuple[DeviceGap, ...],
+    guard_samples: int,
+    invalid_intervals: tuple[ClassifiedInterval, ...],
+    terminal_support: DeviceTerminalSupport | None,
+) -> np.ndarray:
+    """Apply explicit invalidity decisions without changing a segment mapping."""
+
+    result = np.asarray(valid, dtype=bool).copy()
+    for gap in gaps:
+        result &= ~(
+            (canonical_positions >= gap.canonical_start_sample - guard_samples)
+            & (canonical_positions < gap.canonical_end_sample + guard_samples)
+        )
+    for interval in invalid_intervals:
+        expansion = guard_samples if interval.kind in {"missing", "duplicate_destination"} else 0
+        result &= ~(
+            (canonical_positions >= interval.canonical_start_sample - expansion)
+            & (canonical_positions < interval.canonical_end_sample + expansion)
+        )
+    if terminal_support is not None:
+        result &= canonical_positions < terminal_support.supported_canonical_end_sample
+    return result
 
 
 def _common_master_interval(
@@ -171,6 +238,8 @@ def _common_master_interval(
     maximum_common_end: int | None = None,
     maximum_common_end_device_index: int | None = None,
     maximum_common_end_reason: str = "",
+    preserve_device_tails: bool = False,
+    device_sync_segments_supplied: bool = False,
 ) -> tuple[int, int, dict[str, object]]:
     fs = recordings[master_index].fs
     lower_candidates: list[dict[str, object]] = [
@@ -211,15 +280,20 @@ def _common_master_interval(
             gap.missing_samples for gap in gaps_by_device.get(device_index - 1, ())
         )
         # Windowed-sinc ephys interpolation needs symmetric source support.
-        lower_candidates.append(
+        candidates_enabled = (
+            device_index - 1 == master_index
+            or (not preserve_device_tails and not device_sync_segments_supplied)
+        )
+        if candidates_enabled:
+            lower_candidates.append(
             {
                 "device_index": device_index,
                 "device_name": recording.device_name,
                 "stream": "ephys",
                 "candidate_master_sample": (EPHYS_SINC_HALF_WIDTH - model.intercept_samples) / scale,
             }
-        )
-        upper_candidates.append(
+            )
+            upper_candidates.append(
             {
                 "device_index": device_index,
                 "device_name": recording.device_name,
@@ -230,20 +304,21 @@ def _common_master_interval(
                 )
                 / scale,
             }
-        )
+            )
         res_rate = fs / ANALOG_FS
-        upper_candidates.append(
+        if candidates_enabled:
+            upper_candidates.append(
             {
                 "device_index": device_index,
                 "device_name": recording.device_name,
                 "stream": "analog",
                 "candidate_master_sample": (
                     (recording.analog_samples - 1) * res_rate
-                    - model.intercept_samples + total_missing
+                    - model.intercept_samples
                 )
                 / scale,
             }
-        )
+            )
     start_limiter = max(lower_candidates, key=lambda item: float(item["candidate_master_sample"]))
     end_limiter = min(upper_candidates, key=lambda item: float(item["candidate_master_sample"]))
     lower = float(start_limiter["candidate_master_sample"])
@@ -293,7 +368,9 @@ def _windowed_sinc_resampled_chunk(
         block_end = min(source_positions.size, block_start + 4096)
         positions = source_positions[block_start:block_end]
         nearest = np.rint(positions).astype(np.int64)
-        if np.all(np.abs(positions - nearest) <= INTEGER_MAPPING_TOLERANCE_SAMPLES):
+        if cutoff >= 1.0 - 1e-12 and np.all(
+            np.abs(positions - nearest) <= INTEGER_MAPPING_TOLERANCE_SAMPLES
+        ):
             if nearest.min(initial=0) < 0 or nearest.max(initial=0) >= mapped.shape[0]:
                 raise ValueError("Source mapping left the valid recording interval.")
             output[block_start:block_end] = np.asarray(mapped[nearest], dtype=np.int16)
@@ -330,12 +407,26 @@ def _write_interleaved_stream(
     overwrite: bool,
     progress: ProgressCallback | None,
     device_gaps: list[DeviceGap] | None = None,
+    validity_path: Path | None = None,
+    classified_intervals: list[ClassifiedInterval] | None = None,
+    device_source_steps: list[DeviceSourceStep] | None = None,
+    device_terminal_support: list[DeviceTerminalSupport] | None = None,
+    device_sync_segments: list[DeviceSyncSegment] | None = None,
 ) -> tuple[int, int]:
+    if validity_path is not None and stream != "ephys":
+        raise ValueError("validity output is defined only for the ephys stream")
     if output_path.exists() and not overwrite:
         raise FileExistsError(f"Output exists; enable overwrite to regenerate: {output_path}")
+    if validity_path is not None and validity_path.exists() and not overwrite:
+        raise FileExistsError(
+            f"Output exists; enable overwrite to regenerate: {validity_path}"
+        )
     partial = atomic_output_path(output_path)
     if partial.exists():
         partial.unlink()
+    validity_partial = atomic_output_path(validity_path) if validity_path is not None else None
+    if validity_partial is not None and validity_partial.exists():
+        validity_partial.unlink()
     fs = recordings[master_index].fs
     if stream == "ephys":
         out_fs = float(fs)
@@ -360,8 +451,23 @@ def _write_interleaved_stream(
         raise ValueError(f"Unknown stream: {stream}")
     total_channels = sum(channels)
     gaps_by_device = _device_gap_map(list(device_gaps or ()))
+    steps_by_device = _device_source_step_map(list(device_source_steps or ()))
+    intervals_by_device = _device_interval_map(list(classified_intervals or ()))
+    terminal_by_device = _device_terminal_map(list(device_terminal_support or ()))
+    segments_by_device = (
+        _device_segment_map(device_sync_segments, device_count=len(recordings))
+        if device_sync_segments is not None
+        else None
+    )
+    validity_order = _validity_device_order(recordings, master_index) if validity_path is not None else []
     try:
-        with partial.open("wb") as output:
+        with ExitStack() as stack:
+            output = stack.enter_context(partial.open("wb"))
+            validity_output = (
+                stack.enter_context(validity_partial.open("wb"))
+                if validity_partial is not None
+                else None
+            )
             for start in range(0, output_count, chunk_samples):
                 count = min(chunk_samples, output_count - start)
                 if stream == "ephys":
@@ -369,19 +475,76 @@ def _write_interleaved_stream(
                 else:
                     master_positions = common_start + (start + np.arange(count, dtype=np.float64)) * (fs / ANALOG_FS)
                 combined = np.empty((count, total_channels), dtype=np.int16)
+                validity = (
+                    np.empty((count, len(recordings)), dtype=np.uint8)
+                    if validity_partial is not None
+                    else None
+                )
                 channel_start = 0
                 for device_index, (recording, model, source, n_channels) in enumerate(
                     zip(recordings, models, mapped, channels)
                 ):
                     guard = EPHYS_SINC_HALF_WIDTH if stream == "ephys" else int(np.ceil(fs / ANALOG_FS))
-                    source_ephys, valid = _source_coordinates(
-                        model,
-                        master_positions,
-                        gaps_by_device.get(device_index, ()),
-                        fs=fs,
-                        guard_samples=guard,
+                    apply_neural_integrity = stream == "ephys"
+                    if apply_neural_integrity and segments_by_device is not None:
+                        source_ephys, valid = map_canonical_positions(
+                            segments_by_device.get(device_index, ()),
+                            master_positions,
+                            source_sample_count=recording.n_samples,
+                            interpolation_half_width=EPHYS_SINC_HALF_WIDTH,
+                            device_index=device_index + 1,
+                        )
+                        valid = _apply_neural_validity_exclusions(
+                            valid,
+                            master_positions,
+                            gaps=gaps_by_device.get(device_index, ()),
+                            guard_samples=guard,
+                            invalid_intervals=intervals_by_device.get(device_index, ()),
+                            terminal_support=terminal_by_device.get(device_index),
+                        )
+                    else:
+                        source_ephys, valid = _source_coordinates(
+                            model,
+                            master_positions,
+                            gaps_by_device.get(device_index, ()) if apply_neural_integrity else (),
+                            fs=fs,
+                            guard_samples=guard,
+                            source_steps=(
+                                steps_by_device.get(device_index, ())
+                                if apply_neural_integrity
+                                else ()
+                            ),
+                            invalid_intervals=(
+                                intervals_by_device.get(device_index, ())
+                                if apply_neural_integrity
+                                else ()
+                            ),
+                            terminal_support=(
+                                terminal_by_device.get(device_index)
+                                if apply_neural_integrity
+                                else None
+                            ),
                     )
                     source_positions = source_ephys if stream == "ephys" else source_ephys / (fs / ANALOG_FS)
+                    if stream == "ephys":
+                        support_positions = np.where(valid, source_positions, 0.0)
+                        nearest = np.rint(support_positions)
+                        integer_mapping = (
+                            np.abs(support_positions - nearest)
+                            <= INTEGER_MAPPING_TOLERANCE_SAMPLES
+                        )
+                        supported = np.where(
+                            integer_mapping,
+                            (nearest >= 0) & (nearest < source.shape[0]),
+                            (support_positions >= EPHYS_SINC_HALF_WIDTH - 1)
+                            & (support_positions <= source.shape[0] - 1 - EPHYS_SINC_HALF_WIDTH),
+                        )
+                    else:
+                        supported = (
+                            (source_positions >= 0)
+                            & (source_positions <= source.shape[0] - 1)
+                        )
+                    valid &= supported
                     data = np.zeros((count, n_channels), dtype=np.int16)
                     valid_indices = np.flatnonzero(valid)
                     runs: list[np.ndarray] = []
@@ -389,12 +552,35 @@ def _write_interleaved_stream(
                         boundaries = np.flatnonzero(np.diff(valid_indices) > 1) + 1
                         runs = list(np.split(valid_indices, boundaries))
                     if stream == "ephys":
-                        for run in runs:
-                            data[run] = _windowed_sinc_resampled_chunk(
-                                source,
-                                source_positions[run],
-                                cutoff=min(1.0, 1.0 / model.source_scale(fs)),
-                            )
+                        if segments_by_device is not None:
+                            # A chunk can contain adjacent independently fitted
+                            # segments with different sample-rate scales.  Split
+                            # renderer runs at the authoritative segment bounds
+                            # so each uses its own anti-alias cutoff.
+                            for segment in segments_by_device.get(device_index, ()):
+                                if not segment.is_publishable:
+                                    continue
+                                segment_indices = np.flatnonzero(
+                                    valid
+                                    & (master_positions >= segment.canonical_start_sample)
+                                    & (master_positions < segment.canonical_end_sample)
+                                )
+                                if not segment_indices.size:
+                                    continue
+                                boundaries = np.flatnonzero(np.diff(segment_indices) > 1) + 1
+                                for run in np.split(segment_indices, boundaries):
+                                    data[run] = _windowed_sinc_resampled_chunk(
+                                        source,
+                                        source_positions[run],
+                                        cutoff=min(1.0, 1.0 / segment.source_scale),
+                                    )
+                        else:
+                            for run in runs:
+                                data[run] = _windowed_sinc_resampled_chunk(
+                                    source,
+                                    source_positions[run],
+                                    cutoff=min(1.0, 1.0 / model.source_scale(fs)),
+                                )
                     else:
                         for run in runs:
                             data[run] = _linear_resampled_chunk(source, source_positions[run])
@@ -405,16 +591,25 @@ def _write_interleaved_stream(
                             )
                             data[run, 0] = np.asarray(source[nearest, 0], dtype=np.int16)
                     combined[:, channel_start : channel_start + n_channels] = data
+                    if validity is not None:
+                        validity[:, device_index] = valid
                     channel_start += n_channels
                 combined.astype("<i2", copy=False).tofile(output)
+                if validity is not None:
+                    assert validity_output is not None
+                    validity[:, validity_order].tofile(validity_output)
                 if progress is not None:
                     progress(f"write_{stream}", 100.0 * (start + count) / output_count)
         replace_atomic(partial, output_path)
+        if validity_partial is not None and validity_path is not None:
+            replace_atomic(validity_partial, validity_path)
     finally:
         for source in mapped:
             close_memmap(source)
         if partial.exists():
             partial.unlink()
+        if validity_partial is not None and validity_partial.exists():
+            validity_partial.unlink()
     return output_count, total_channels
 
 
@@ -429,29 +624,128 @@ def _write_time_dat(path: Path, n_samples: int, overwrite: bool) -> None:
     replace_atomic(partial, path)
 
 
-def _write_layout(path: Path, recordings: list[Recording]) -> None:
-    with path.open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.writer(stream, delimiter="\t")
-        writer.writerow(
-            ["merged_channel", "device_index", "device_name", "recording_name", "device_channel", "device_folder"]
+def _validity_summary(path: Path, n_samples: int, device_count: int) -> dict[str, object]:
+    mapped = np.memmap(path, dtype=np.uint8, mode="r", shape=(n_samples, device_count))
+    counts = np.zeros(device_count, dtype=np.int64)
+    common_count = 0
+    try:
+        for start in range(0, n_samples, 1_000_000):
+            block = np.asarray(mapped[start : min(n_samples, start + 1_000_000)]) != 0
+            counts += np.count_nonzero(block, axis=0)
+            common_count += int(np.count_nonzero(np.all(block, axis=1)))
+    finally:
+        close_memmap(mapped)
+    return {
+        "valid_samples_by_channel": counts.tolist(),
+        "valid_fraction_by_channel": (counts / max(1, n_samples)).tolist(),
+        "common_valid_samples": common_count,
+        "common_valid_fraction": common_count / max(1, n_samples),
+    }
+
+
+def apply_staged_zero_fill(
+    amplifier_path: Path,
+    validity_path: Path,
+    recordings: list[Recording],
+    master_index: int,
+    *,
+    canonical_start_sample: int,
+    n_output_samples: int,
+    intervals: list[ClassifiedInterval],
+) -> dict[str, object]:
+    """Apply QC-derived exclusions to staged neural data and validity in place."""
+
+    total_channels = sum(recording.n_channels for recording in recordings)
+    expected_amplifier_bytes = n_output_samples * total_channels * np.dtype("<i2").itemsize
+    expected_validity_bytes = n_output_samples * len(recordings)
+    amplifier_path = Path(amplifier_path)
+    validity_path = Path(validity_path)
+    if amplifier_path.stat().st_size != expected_amplifier_bytes:
+        raise ValueError("staged amplifier size changed before post-merge exclusion")
+    if validity_path.stat().st_size != expected_validity_bytes:
+        raise ValueError("staged validity size changed before post-merge exclusion")
+
+    channel_bounds: list[tuple[int, int]] = []
+    channel_start = 0
+    for recording in recordings:
+        channel_end = channel_start + recording.n_channels
+        channel_bounds.append((channel_start, channel_end))
+        channel_start = channel_end
+    validity_channels = {
+        device_index: validity_channel
+        for validity_channel, device_index in enumerate(
+            _validity_device_order(recordings, master_index)
         )
-        merged_channel = 1
-        for device_index, recording in enumerate(recordings, start=1):
-            for channel in range(1, recording.n_channels + 1):
-                writer.writerow(
-                    [
-                        merged_channel,
-                        device_index,
-                        recording.device_name,
-                        recording.recording_name,
-                        channel,
-                        str(recording.folder),
-                    ]
-                )
-                merged_channel += 1
+    }
+    amplifier = np.memmap(
+        amplifier_path,
+        dtype="<i2",
+        mode="r+",
+        shape=(n_output_samples, total_channels),
+        order="C",
+    )
+    validity = np.memmap(
+        validity_path,
+        dtype=np.uint8,
+        mode="r+",
+        shape=(n_output_samples, len(recordings)),
+        order="C",
+    )
+    try:
+        for interval in intervals:
+            if interval.action != "zero_fill":
+                continue
+            start = max(0, interval.canonical_start_sample - canonical_start_sample)
+            end = min(
+                n_output_samples,
+                interval.canonical_end_sample - canonical_start_sample,
+            )
+            if end <= start:
+                continue
+            for device_index in interval.affected_device_indices:
+                source_index = device_index - 1
+                if source_index < 0 or source_index >= len(recordings):
+                    raise ValueError(f"invalid post-merge exclusion device index {device_index}")
+                first_channel, last_channel = channel_bounds[source_index]
+                amplifier[start:end, first_channel:last_channel] = 0
+                validity[start:end, validity_channels[source_index]] = 0
+        amplifier.flush()
+        validity.flush()
+    finally:
+        close_memmap(amplifier)
+        close_memmap(validity)
+    return _validity_summary(validity_path, n_output_samples, len(recordings))
 
 
-def _write_events(
+def _channel_layout_records(
+    recordings: list[Recording], master_index: int
+) -> list[dict[str, object]]:
+    validity_channels = {
+        device_index: validity_channel
+        for validity_channel, device_index in enumerate(
+            _validity_device_order(recordings, master_index)
+        )
+    }
+    rows: list[dict[str, object]] = []
+    merged_channel = 1
+    for device_index, recording in enumerate(recordings, start=1):
+        for channel in range(1, recording.n_channels + 1):
+            rows.append(
+                {
+                    "merged_channel": merged_channel,
+                    "device_index": device_index,
+                    "device_name": recording.device_name,
+                    "recording_name": recording.recording_name,
+                    "device_channel": channel,
+                    "device_folder": str(recording.folder),
+                    "validity_channel": validity_channels[device_index - 1],
+                }
+            )
+            merged_channel += 1
+    return rows
+
+
+def _collect_events(
     analog_path: Path,
     output_folder: Path,
     recordings: list[Recording],
@@ -462,12 +756,16 @@ def _write_events(
     device_gaps: list[DeviceGap] | None = None,
     common_start: int = 0,
     fs: float = 20_000.0,
-) -> Path:
+    classified_intervals: list[ClassifiedInterval] | None = None,
+    device_terminal_support: list[DeviceTerminalSupport] | None = None,
+    write_event_files: bool = False,
+) -> list[dict[str, object]]:
     mapped = interleaved_memmap(analog_path, total_analog_channels, analog_samples)
-    summary_path = output_folder / "wild_multilogger_events.tsv"
     published_output_folder = output_folder if published_output_folder is None else published_output_folder
-    rows: list[list[object]] = []
+    rows: list[dict[str, object]] = []
     gaps_by_device = _device_gap_map(list(device_gaps or ()))
+    intervals_by_device = _device_interval_map(list(classified_intervals or ()))
+    terminal_by_device = _device_terminal_map(list(device_terminal_support or ()))
     block_start = 0
     try:
         for device_index, recording in enumerate(recordings, start=1):
@@ -479,6 +777,24 @@ def _write_events(
                         int(np.floor((gap.canonical_start_sample - common_start) * ANALOG_FS / fs)),
                         int(np.ceil((gap.canonical_end_sample - common_start) * ANALOG_FS / fs)),
                     ]
+                )
+            for interval in intervals_by_device.get(device_index - 1, ()):
+                gap_edges.extend(
+                    [
+                        int(np.floor((interval.canonical_start_sample - common_start) * ANALOG_FS / fs)),
+                        int(np.ceil((interval.canonical_end_sample - common_start) * ANALOG_FS / fs)),
+                    ]
+                )
+            terminal = terminal_by_device.get(device_index - 1)
+            if terminal is not None:
+                gap_edges.append(
+                    int(
+                        np.floor(
+                            (terminal.supported_canonical_end_sample - common_start)
+                            * ANALOG_FS
+                            / fs
+                        )
+                    )
                 )
             for bit_index in range(16):
                 state = ((digital >> bit_index) & 1).astype(np.int8)
@@ -499,7 +815,7 @@ def _write_events(
                 ends = np.asarray([item[1] for item in paired], dtype=np.int64)
                 count = len(paired)
                 event_path = output_folder / f"device_event.dev{device_index:02d}.d{bit_index + 1:02d}.evt"
-                if count:
+                if count and write_event_files:
                     if event_path.exists() and not overwrite:
                         raise FileExistsError(f"Output exists; enable overwrite to regenerate: {event_path}")
                     with event_path.open("w", encoding="utf-8") as stream:
@@ -512,36 +828,21 @@ def _write_events(
                         event_path.unlink()
                     event_text = ""
                 rows.append(
-                [
-                    device_index,
-                    recording.device_name,
-                    recording.recording_name,
-                    bit_index + 1,
-                    block_start + 1,
-                    count,
-                    gap_affected_count,
-                    event_text,
-                ]
+                    {
+                        "device_index": device_index,
+                        "device_name": recording.device_name,
+                        "recording_name": recording.recording_name,
+                        "digital_bit": bit_index + 1,
+                        "merged_analog_channel": block_start + 1,
+                        "event_count": count,
+                        "gap_affected_event_count_excluded": gap_affected_count,
+                        "event_file": event_text,
+                    }
                 )
             block_start += recording.analog_channels
     finally:
         close_memmap(mapped)
-    with summary_path.open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.writer(stream, delimiter="\t")
-        writer.writerow(
-            [
-                "device_index",
-                "device_name",
-                "recording_name",
-                "digital_bit",
-                "merged_analog_channel",
-                "n_events",
-                "n_gap_affected_events_excluded",
-                "event_file",
-            ]
-        )
-        writer.writerows(rows)
-    return summary_path
+    return rows
 
 
 def _recover_interrupted_transactions(output_folder: Path) -> None:
@@ -592,10 +893,25 @@ def _merge_recordings_into_folder(
     maximum_common_end: int | None = None,
     maximum_common_end_device_index: int | None = None,
     maximum_common_end_reason: str = "",
+    classified_intervals: list[ClassifiedInterval] | None = None,
+    device_source_steps: list[DeviceSourceStep] | None = None,
+    device_terminal_support: list[DeviceTerminalSupport] | None = None,
+    preserve_device_tails: bool = False,
+    write_event_files: bool = False,
+    device_sync_segments: list[DeviceSyncSegment] | None = None,
+    timing: TimingCallback | None = None,
 ) -> dict[str, str]:
     output_folder.mkdir(parents=True, exist_ok=True)
     models = _device_models(recordings, master_index, pair_models)
     device_gaps = list(device_gaps or ())
+    classified_intervals = list(classified_intervals or ())
+    device_source_steps = list(device_source_steps or ())
+    device_terminal_support = list(device_terminal_support or ())
+    segments_by_device = (
+        _device_segment_map(device_sync_segments, device_count=len(recordings))
+        if device_sync_segments is not None
+        else None
+    )
     common_start, common_end, common_interval_limits = _common_master_interval(
         recordings,
         models,
@@ -605,6 +921,8 @@ def _merge_recordings_into_folder(
         maximum_common_end,
         maximum_common_end_device_index,
         maximum_common_end_reason,
+        preserve_device_tails,
+        device_sync_segments is not None,
     )
     def output_gap_action(gap: DeviceGap) -> str:
         if gap.canonical_end_sample + EPHYS_SINC_HALF_WIDTH <= common_start:
@@ -617,50 +935,121 @@ def _merge_recordings_into_folder(
     amplifier_path = output_folder / "amplifier.dat"
     analog_path = output_folder / "analogin.dat"
     time_path = output_folder / "time.dat"
-    layout_path = output_folder / "wild_preprocess_channel_layout.tsv"
-    merge_mat_path = output_folder / "wild_multilogger_mergeInfo.mat"
-    merge_json_path = output_folder / "wild_multilogger_mergeInfo.json"
+    validity_path = output_folder / "valid_samples.dat"
+    internal_merge_path = output_folder / ".wild_internal_merge.json"
     published_output_folder = output_folder if published_output_folder is None else published_output_folder
-    ephys_samples, total_channels = _write_interleaved_stream(
-        amplifier_path,
-        recordings,
-        models,
-        master_index,
-        common_start,
-        common_end,
-        stream="ephys",
-        chunk_seconds=chunk_seconds,
-        overwrite=overwrite,
-        progress=progress,
-        device_gaps=device_gaps,
-    )
-    analog_samples, total_analog_channels = _write_interleaved_stream(
-        analog_path,
-        recordings,
-        models,
-        master_index,
-        common_start,
-        common_end,
-        stream="analog",
-        chunk_seconds=chunk_seconds,
-        overwrite=overwrite,
-        progress=progress,
-        device_gaps=device_gaps,
-    )
+    if timing is not None:
+        timing("ephys_merge", "start", 0, 0)
+    try:
+        ephys_samples, total_channels = _write_interleaved_stream(
+            amplifier_path,
+            recordings,
+            models,
+            master_index,
+            common_start,
+            common_end,
+            stream="ephys",
+            chunk_seconds=chunk_seconds,
+            overwrite=overwrite,
+            progress=progress,
+            device_gaps=device_gaps,
+            validity_path=validity_path,
+            classified_intervals=classified_intervals,
+            device_source_steps=device_source_steps,
+            device_terminal_support=device_terminal_support,
+            device_sync_segments=device_sync_segments,
+        )
+    except BaseException:
+        if timing is not None:
+            timing("ephys_merge", "failed", 0, 0)
+        raise
+    else:
+        if timing is not None:
+            timing(
+                "ephys_merge",
+                "complete",
+                0,
+                amplifier_path.stat().st_size + validity_path.stat().st_size,
+            )
+    if timing is not None:
+        timing("analog_merge", "start", 0, 0)
+    try:
+        analog_samples, total_analog_channels = _write_interleaved_stream(
+            analog_path,
+            recordings,
+            models,
+            master_index,
+            common_start,
+            common_end,
+            stream="analog",
+            chunk_seconds=chunk_seconds,
+            overwrite=overwrite,
+            progress=progress,
+            device_gaps=device_gaps,
+            classified_intervals=classified_intervals,
+            device_source_steps=device_source_steps,
+            device_terminal_support=device_terminal_support,
+            device_sync_segments=device_sync_segments,
+        )
+    except BaseException:
+        if timing is not None:
+            timing("analog_merge", "failed", 0, 0)
+        raise
+    else:
+        if timing is not None:
+            timing("analog_merge", "complete", 0, analog_path.stat().st_size)
+    validity_summary = _validity_summary(validity_path, ephys_samples, len(recordings))
     _write_time_dat(time_path, ephys_samples, overwrite)
-    _write_layout(layout_path, recordings)
-    events_path = _write_events(
+    channel_layout = _channel_layout_records(recordings, master_index)
+    event_summary = _collect_events(
         analog_path,
         output_folder,
         recordings,
         analog_samples,
         total_analog_channels,
         overwrite,
-        published_output_folder,
-        device_gaps,
-        common_start,
-        recordings[master_index].fs,
+        published_output_folder=published_output_folder,
+        device_gaps=device_gaps,
+        common_start=common_start,
+        fs=recordings[master_index].fs,
+        classified_intervals=classified_intervals,
+        device_terminal_support=device_terminal_support,
+        write_event_files=write_event_files,
     )
+
+    def mapped_ephys_sample(
+        device_index: int, model: SyncModel, canonical_sample: int
+    ) -> float | None:
+        if segments_by_device is not None:
+            source, valid = map_canonical_positions(
+                segments_by_device[device_index - 1],
+                np.asarray([canonical_sample], dtype=np.float64),
+                source_sample_count=recordings[device_index - 1].n_samples,
+                interpolation_half_width=0,
+                device_index=device_index,
+            )
+            return float(source[0]) if bool(valid[0]) else None
+        return (
+            model.source_scale(recordings[master_index].fs) * canonical_sample
+            + model.intercept_samples
+            - sum(
+                gap.missing_samples
+                for gap in device_gaps
+                if gap.device_index == device_index
+                and gap.canonical_end_sample <= canonical_sample
+            )
+            + (
+                0.0
+                if device_sync_segments is not None
+                else sum(
+                    step.source_step_samples
+                    for step in device_source_steps
+                    if step.device_index == device_index
+                    and step.canonical_sample <= canonical_sample
+                )
+            )
+        )
+
     merge_info = {
         "backend": SYNC_ALGORITHM_VERSION,
         "run_id": run_id,
@@ -671,8 +1060,38 @@ def _merge_recordings_into_folder(
         "common_end_master_sample": common_end,
         "n_samples": ephys_samples,
         "n_channels": total_channels,
+        "validity_samples_file": validity_path.name,
+        "validity_samples_dtype": "uint8",
+        "validity_samples_shape": [ephys_samples, len(recordings)],
+        "validity_samples_layout": "sample_major_interleaved",
+        "validity_summary": validity_summary,
+        "validity_samples_channels": [
+            {
+                "channel": validity_channel,
+                "role": "master" if device_index == master_index else f"slave {validity_channel}",
+                "device_index": device_index + 1,
+                "device_name": recordings[device_index].device_name,
+                "device_folder": str(recordings[device_index].folder),
+                "amplifier_channel_start": sum(
+                    recording.n_channels for recording in recordings[:device_index]
+                ),
+                "amplifier_channel_count": recordings[device_index].n_channels,
+            }
+            for validity_channel, device_index in enumerate(
+                _validity_device_order(recordings, master_index)
+            )
+        ],
         "analog_samples": analog_samples,
         "analog_channels": total_analog_channels,
+        "event_files_written": write_event_files,
+        "digital_events": event_summary,
+        "channel_layout": channel_layout,
+        "output_files": {
+            "amplifier": amplifier_path.name,
+            "analog": analog_path.name,
+            "time": time_path.name,
+            "validity": validity_path.name,
+        },
         "common_interval_limits": common_interval_limits,
         "coordinate_system": "canonical_gap_aware_ephys_samples",
         "device_gaps": [
@@ -692,6 +1111,15 @@ def _merge_recordings_into_folder(
             }
             for gap in device_gaps
         ],
+        "classified_intervals": [interval.to_dict() for interval in classified_intervals],
+        "device_source_steps": [step.to_dict() for step in device_source_steps],
+        "device_terminal_support": [support.to_dict() for support in device_terminal_support],
+        "device_sync_segments": (
+            [segment.to_dict() for segment in device_sync_segments]
+            if device_sync_segments is not None
+            else []
+        ),
+        "segment_mapping_authoritative": device_sync_segments is not None,
         "imu_status": "not generated by the Python multi-device backend",
         "devices": [
             {
@@ -702,164 +1130,32 @@ def _merge_recordings_into_folder(
                 "intercept_samples": model.intercept_samples,
                 "drift_ppm": model.drift_ppm,
                 "mapped_ephys_start_sample": (
-                    model.source_scale(recordings[master_index].fs) * common_start
-                    + model.intercept_samples
-                    - sum(
-                        gap.missing_samples
-                        for gap in device_gaps
-                        if gap.device_index == device_index
-                        and gap.canonical_end_sample <= common_start
-                    )
+                    mapped_ephys_sample(device_index, model, common_start)
                 ),
                 "mapped_ephys_end_sample": (
-                    model.source_scale(recordings[master_index].fs) * common_end
-                    + model.intercept_samples
-                    - sum(
-                        gap.missing_samples
-                        for gap in device_gaps
-                        if gap.device_index == device_index
-                        and gap.canonical_end_sample <= common_end
-                    )
+                    mapped_ephys_sample(device_index, model, common_end)
                 ),
                 "mapped_analog_start_sample": (
                     model.source_scale(recordings[master_index].fs) * common_start
                     + model.intercept_samples
-                    - sum(
-                        gap.missing_samples
-                        for gap in device_gaps
-                        if gap.device_index == device_index
-                        and gap.canonical_end_sample <= common_start
-                    )
                 )
                 / (recordings[master_index].fs / ANALOG_FS),
                 "mapped_analog_end_sample": (
                     model.source_scale(recordings[master_index].fs) * common_end
                     + model.intercept_samples
-                    - sum(
-                        gap.missing_samples
-                        for gap in device_gaps
-                        if gap.device_index == device_index
-                        and gap.canonical_end_sample <= common_end
-                    )
                 )
                 / (recordings[master_index].fs / ANALOG_FS),
             }
             for device_index, (recording, model) in enumerate(zip(recordings, models), start=1)
         ],
     }
-    merge_json_path.write_text(json.dumps(merge_info, indent=2), encoding="utf-8")
-    savemat(
-        merge_mat_path,
-        {
-            "mergeInfo": {
-                "mode": "multiMerge",
-                "runId": run_id,
-                "files": np.asarray([str(recording.amplifier_file) for recording in recordings], dtype=object),
-                "folders": np.asarray([str(recording.folder) for recording in recordings], dtype=object),
-                "masterIndex": master_index + 1,
-                "fs": recordings[master_index].fs,
-                "nChannels": total_channels,
-                "nSamples": ephys_samples,
-                "commonStartSample": common_start,
-                "commonEndSample": common_end,
-                "amplifierFile": str(published_output_folder / amplifier_path.name),
-                "analogFile": str(published_output_folder / analog_path.name),
-                "timeFile": str(published_output_folder / time_path.name),
-                "layoutFile": str(published_output_folder / layout_path.name),
-                "backend": SYNC_ALGORITHM_VERSION,
-                "commonIntervalLimits": common_interval_limits,
-                "deviceGapDeviceIndex": np.asarray(
-                    [gap.device_index for gap in device_gaps], dtype=np.int32
-                ),
-                "deviceGapCanonicalStartSample": np.asarray(
-                    [gap.canonical_start_sample for gap in device_gaps], dtype=np.int64
-                ),
-                "deviceGapMissingSamples": np.asarray(
-                    [gap.missing_samples for gap in device_gaps], dtype=np.int64
-                ),
-                "deviceGapInterpolationGuardSamples": EPHYS_SINC_HALF_WIDTH,
-                "deviceGapZeroFillStartSample": np.asarray(
-                    [gap.canonical_start_sample - EPHYS_SINC_HALF_WIDTH for gap in device_gaps],
-                    dtype=np.int64,
-                ),
-                "deviceGapZeroFillEndSample": np.asarray(
-                    [gap.canonical_end_sample + EPHYS_SINC_HALF_WIDTH for gap in device_gaps],
-                    dtype=np.int64,
-                ),
-                "deviceGapOutputAction": np.asarray(
-                    [output_gap_action(gap) for gap in device_gaps], dtype=object
-                ),
-                "deviceMappedEphysStartSample": np.asarray(
-                    [item["mapped_ephys_start_sample"] for item in merge_info["devices"]]
-                ),
-                "deviceMappedEphysEndSample": np.asarray(
-                    [item["mapped_ephys_end_sample"] for item in merge_info["devices"]]
-                ),
-                "deviceMappedAnalogStartSample": np.asarray(
-                    [item["mapped_analog_start_sample"] for item in merge_info["devices"]]
-                ),
-                "deviceMappedAnalogEndSample": np.asarray(
-                    [item["mapped_analog_end_sample"] for item in merge_info["devices"]]
-                ),
-            },
-            "master_index": master_index + 1,
-            "fs": recordings[master_index].fs,
-            "common_start_master_sample": common_start,
-            "common_end_master_sample": common_end,
-            "n_samples": ephys_samples,
-            "n_channels": total_channels,
-            "device_scale": np.asarray([item["scale"] for item in merge_info["devices"]]),
-            "device_intercept_samples": np.asarray(
-                [item["intercept_samples"] for item in merge_info["devices"]]
-            ),
-            "device_drift_ppm": np.asarray([item["drift_ppm"] for item in merge_info["devices"]]),
-            "common_interval_limits": common_interval_limits,
-            "device_gap_device_index": np.asarray(
-                [gap.device_index for gap in device_gaps], dtype=np.int32
-            ),
-            "device_gap_canonical_start_sample": np.asarray(
-                [gap.canonical_start_sample for gap in device_gaps], dtype=np.int64
-            ),
-            "device_gap_missing_samples": np.asarray(
-                [gap.missing_samples for gap in device_gaps], dtype=np.int64
-            ),
-            "device_gap_interpolation_guard_samples": EPHYS_SINC_HALF_WIDTH,
-            "device_gap_zero_fill_start_sample": np.asarray(
-                [gap.canonical_start_sample - EPHYS_SINC_HALF_WIDTH for gap in device_gaps],
-                dtype=np.int64,
-            ),
-            "device_gap_zero_fill_end_sample": np.asarray(
-                [gap.canonical_end_sample + EPHYS_SINC_HALF_WIDTH for gap in device_gaps],
-                dtype=np.int64,
-            ),
-            "device_gap_output_action": np.asarray(
-                [output_gap_action(gap) for gap in device_gaps], dtype=object
-            ),
-            "device_source_ephys_start": np.asarray(
-                [item["mapped_ephys_start_sample"] for item in merge_info["devices"]]
-            ),
-            "device_source_ephys_end": np.asarray(
-                [item["mapped_ephys_end_sample"] for item in merge_info["devices"]]
-            ),
-            "device_source_analog_start": np.asarray(
-                [item["mapped_analog_start_sample"] for item in merge_info["devices"]]
-            ),
-            "device_source_analog_end": np.asarray(
-                [item["mapped_analog_end_sample"] for item in merge_info["devices"]]
-            ),
-            "device_folders": np.asarray([str(recording.folder) for recording in recordings], dtype=object),
-        },
-        do_compression=True,
-        long_field_names=True,
-    )
+    internal_merge_path.write_text(json.dumps(merge_info, indent=2), encoding="utf-8")
     return {
         "amplifier": str(amplifier_path),
         "analog": str(analog_path),
         "time": str(time_path),
-        "layout": str(layout_path),
-        "events": str(events_path),
-        "merge_mat": str(merge_mat_path),
-        "merge_json": str(merge_json_path),
+        "validity": str(validity_path),
+        "_merge_internal": str(internal_merge_path),
     }
 
 
@@ -880,6 +1176,13 @@ def merge_recordings(
     maximum_common_end: int | None = None,
     maximum_common_end_device_index: int | None = None,
     maximum_common_end_reason: str = "",
+    classified_intervals: list[ClassifiedInterval] | None = None,
+    device_source_steps: list[DeviceSourceStep] | None = None,
+    device_terminal_support: list[DeviceTerminalSupport] | None = None,
+    preserve_device_tails: bool = False,
+    write_event_files: bool = False,
+    device_sync_segments: list[DeviceSyncSegment] | None = None,
+    timing: TimingCallback | None = None,
 ) -> dict[str, str]:
     """Stage a complete merged dataset before replacing session-level files.
 
@@ -898,10 +1201,23 @@ def merge_recordings(
         "amplifier.dat",
         "analogin.dat",
         "time.dat",
+        "valid_samples.dat",
+    }
+    legacy_python_metadata_names = {
         "wild_preprocess_channel_layout.tsv",
         "wild_multilogger_events.tsv",
         "wild_multilogger_mergeInfo.mat",
         "wild_multilogger_mergeInfo.json",
+        "wild_multilogger_sync_qc.tsv",
+        "wild_multilogger_sync_qc.json",
+        "wild_multilogger_sync_qc.mat",
+        "wild_multilogger_postmerge_qc.json",
+        "pc_time_qc.json",
+    }
+    legacy_pair_figures = {
+        path.name
+        for path in output_folder.glob("wild_multilogger_sync_master_vs_*_qc.png")
+        if path.is_file()
     }
     event_names = {
         f"device_event.dev{device_index:02d}.d{bit_index:02d}.evt"
@@ -915,6 +1231,8 @@ def merge_recordings(
     managed_names = (
         fixed_names
         | event_names
+        | legacy_python_metadata_names
+        | legacy_pair_figures
         | set(additional_managed_names or ())
         | _previous_managed_names(output_folder)
     )
@@ -944,9 +1262,21 @@ def merge_recordings(
             maximum_common_end=maximum_common_end,
             maximum_common_end_device_index=maximum_common_end_device_index,
             maximum_common_end_reason=maximum_common_end_reason,
+            classified_intervals=classified_intervals,
+            device_source_steps=device_source_steps,
+            device_terminal_support=device_terminal_support,
+            preserve_device_tails=preserve_device_tails,
+            write_event_files=write_event_files,
+            device_sync_segments=device_sync_segments,
+            timing=timing,
         )
         if stage_callback is not None:
             stage_callback(staging, staged_outputs)
+        internal_names = {
+            Path(value).name for key, value in staged_outputs.items() if key.startswith("_")
+        }
+        for name in internal_names:
+            (staging / name).unlink(missing_ok=True)
         staged_files = {path.name: path for path in staging.iterdir() if path.is_file()}
         missing = fixed_names - set(staged_files)
         if missing:
@@ -972,7 +1302,11 @@ def merge_recordings(
             os.replace(staged_path, destination)
             promoted.append(destination)
         (backup / "COMMITTED").write_text("complete\n", encoding="utf-8")
-        return {key: str(output_folder / Path(value).name) for key, value in staged_outputs.items()}
+        return {
+            key: str(output_folder / Path(value).name)
+            for key, value in staged_outputs.items()
+            if not key.startswith("_")
+        }
     except BaseException:
         for destination in promoted:
             if destination.exists():

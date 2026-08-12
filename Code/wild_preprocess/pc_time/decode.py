@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import re
 import struct
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import overload
 
 import numpy as np
 
@@ -32,6 +33,17 @@ class PcTimeLayout:
     expanded_low_channel_index: int = 3
     expanded_high_channel_index: int = 4
     expand_factor: int = EXPANDED_SAMPLES_PER_RAW_CYCLE
+
+
+@dataclass(frozen=True)
+class PackedUpdateDiagnostics:
+    raw_candidate_run_count: int
+    accepted_update_count: int
+    rejected_unstable_run_count: int
+    minimum_stable_cycles: int
+
+    def to_dict(self) -> dict[str, int]:
+        return asdict(self)
 
 
 CE64_RAW_MISC_LAYOUT = PcTimeLayout(name="ce64-raw-misc", raw_misc=True)
@@ -117,21 +129,71 @@ def resolve_recording_start_ms(
     raise ValueError("No absolute recording-start anchor in CE_params.bin, folder name, or worker job.")
 
 
-def _packed_updates_from_words(words: np.ndarray, indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _packed_updates_from_words(
+    words: np.ndarray,
+    indices: np.ndarray,
+    *,
+    minimum_stable_cycles: int = 2,
+) -> tuple[np.ndarray, np.ndarray, PackedUpdateDiagnostics]:
     packed = words[:, 0].astype(np.uint32) | (words[:, 1].astype(np.uint32) << 16)
-    valid = packed != 0
-    packed, indices = packed[valid], indices[valid]
     if packed.size == 0:
-        return indices.astype(np.int64), packed
-    changed = np.r_[True, packed[1:] != packed[:-1]]
-    return indices[changed].astype(np.int64), packed[changed].astype(np.uint32)
+        diagnostics = PackedUpdateDiagnostics(0, 0, 0, minimum_stable_cycles)
+        return indices.astype(np.int64), packed, diagnostics
+    run_starts = np.r_[0, np.flatnonzero(packed[1:] != packed[:-1]) + 1]
+    run_ends = np.r_[run_starts[1:], packed.size]
+    run_values = packed[run_starts]
+    run_lengths = run_ends - run_starts
+    candidates = run_values != 0
+    stable = candidates & (run_lengths >= minimum_stable_cycles)
+    accepted_values = run_values[stable]
+    accepted_indices = indices[run_starts[stable]]
+    if accepted_values.size:
+        changed = np.r_[True, accepted_values[1:] != accepted_values[:-1]]
+        accepted_values = accepted_values[changed]
+        accepted_indices = accepted_indices[changed]
+    diagnostics = PackedUpdateDiagnostics(
+        raw_candidate_run_count=int(np.count_nonzero(candidates)),
+        accepted_update_count=int(accepted_values.size),
+        rejected_unstable_run_count=int(np.count_nonzero(candidates & ~stable)),
+        minimum_stable_cycles=minimum_stable_cycles,
+    )
+    return (
+        accepted_indices.astype(np.int64),
+        accepted_values.astype(np.uint32),
+        diagnostics,
+    )
 
 
-def collect_packed_updates(analog_path: Path, layout: PcTimeLayout = CE64_RAW_MISC_LAYOUT) -> tuple[np.ndarray, np.ndarray]:
-    """Return unique packed updates and their ephys-sample coordinates.
+@overload
+def collect_packed_updates(
+    analog_path: Path,
+    layout: PcTimeLayout = CE64_RAW_MISC_LAYOUT,
+    *,
+    return_diagnostics: bool = False,
+) -> tuple[np.ndarray, np.ndarray]: ...
+
+
+@overload
+def collect_packed_updates(
+    analog_path: Path,
+    layout: PcTimeLayout,
+    *,
+    return_diagnostics: bool,
+) -> tuple[np.ndarray, np.ndarray, PackedUpdateDiagnostics]: ...
+
+
+def collect_packed_updates(
+    analog_path: Path,
+    layout: PcTimeLayout = CE64_RAW_MISC_LAYOUT,
+    *,
+    return_diagnostics: bool = False,
+) -> tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, PackedUpdateDiagnostics]:
+    """Return stable unique packed updates and their ephys-sample coordinates.
 
     CE64 raw-misc cycles are expanded to ephys coordinates using ``expand_factor``.
     The expanded-analog layout is kept for legacy recordings with six int16 lanes.
+    A nonzero packed value must persist for at least two source cycles; shorter
+    runs are retained only in optional decoder diagnostics.
     """
 
     analog_path = Path(analog_path)
@@ -147,7 +209,8 @@ def collect_packed_updates(analog_path: Path, layout: PcTimeLayout = CE64_RAW_MI
             cycles = words.reshape(-1, layout.raw_words_per_cycle)
             lanes = cycles[:, [layout.raw_low_word_index, layout.raw_high_word_index]]
             indices = np.arange(cycles.shape[0], dtype=np.int64) * layout.expand_factor
-            return _packed_updates_from_words(np.asarray(lanes), indices)
+            result = _packed_updates_from_words(np.asarray(lanes), indices)
+            return result if return_diagnostics else result[:2]
         finally:
             mmap = getattr(words, "_mmap", None)
             if mmap is not None:
@@ -159,7 +222,8 @@ def collect_packed_updates(analog_path: Path, layout: PcTimeLayout = CE64_RAW_MI
     try:
         lanes = words[:, [layout.expanded_low_channel_index, layout.expanded_high_channel_index]]
         indices = np.arange(words.shape[0], dtype=np.int64)
-        return _packed_updates_from_words(np.asarray(lanes), indices)
+        result = _packed_updates_from_words(np.asarray(lanes), indices)
+        return result if return_diagnostics else result[:2]
     finally:
         mmap = getattr(words, "_mmap", None)
         if mmap is not None:

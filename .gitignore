@@ -25,3 +25,4 @@ Code/WILD_preprocess_gui/*.local*.png
 tests/*
 change_log/
 implementation_plan/
+Firmware/*

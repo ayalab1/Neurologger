@@ -8,6 +8,7 @@ temporarily for callers which still have an already-generated raw-master file.
 from .decode import (
     CE64_RAW_MISC_LAYOUT,
     EXPANDED_ANALOG_LAYOUT,
+    PackedUpdateDiagnostics,
     PcTimeLayout,
     collect_packed_updates,
     infer_recording_start_from_name,
@@ -16,11 +17,29 @@ from .decode import (
 from .infer import PcTimeModel, fit_robust_pc_time_model
 from .validate import PcTimeOptions, PcTimeValidation, validate_pc_time_interval
 from .write import align_pc_time_file, write_interval_pc_time
-from .report import pc_time_qc_payload, write_pc_time_qc_json, write_pc_time_summary_png
+from .report import (
+    pc_time_qc_payload,
+    write_pc_time_qc_json,
+    write_pc_time_summary_png,
+    write_pc_time_warning_png,
+)
+from .canonical import (
+    CameraTimestampMapping,
+    CanonicalPcTimeFit,
+    fit_gap_aware_pc_time_model,
+    map_camera_timestamps_to_canonical,
+    map_raw_master_indices_to_canonical,
+    unwrap_daily_ms,
+    validate_canonical_pc_time_interval,
+    write_canonical_interval_pc_time,
+)
 
 __all__ = [
     "CE64_RAW_MISC_LAYOUT",
+    "CameraTimestampMapping",
+    "CanonicalPcTimeFit",
     "EXPANDED_ANALOG_LAYOUT",
+    "PackedUpdateDiagnostics",
     "PcTimeLayout",
     "PcTimeModel",
     "PcTimeOptions",
@@ -28,11 +47,18 @@ __all__ = [
     "align_pc_time_file",
     "collect_packed_updates",
     "fit_robust_pc_time_model",
+    "fit_gap_aware_pc_time_model",
     "infer_recording_start_from_name",
+    "map_camera_timestamps_to_canonical",
+    "map_raw_master_indices_to_canonical",
     "resolve_recording_start_ms",
     "validate_pc_time_interval",
+    "validate_canonical_pc_time_interval",
+    "unwrap_daily_ms",
     "pc_time_qc_payload",
     "write_pc_time_qc_json",
     "write_pc_time_summary_png",
+    "write_pc_time_warning_png",
     "write_interval_pc_time",
+    "write_canonical_interval_pc_time",
 ]

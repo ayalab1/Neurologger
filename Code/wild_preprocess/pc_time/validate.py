@@ -124,9 +124,6 @@ def validate_pc_time_interval(
     end_ms = (common_start_master_sample + n_samples - 1) * 1000.0 / sample_rate_hz
     duration_sec = max((end_ms - start_ms) / 1000.0, 0.0)
     # Robustly kept anchors support coverage and residual-RMS estimates.
-    # Ordered step/rate diagnostics below deliberately use every decoded,
-    # lifted observation in the saved interval; otherwise robust fitting could
-    # hide an entire bad clock regime by marking it as an outlier.
     kept_times = model.device_ms[model.keep_mask]
     kept_residuals = model.residual_ms[model.keep_mask]
     inside = (kept_times >= start_ms) & (kept_times <= end_ms)
@@ -165,7 +162,7 @@ def validate_pc_time_interval(
     ]
     failures = [message for passed, message in checks if not passed]
     return PcTimeValidation(
-        status="OK" if not failures else "FAIL",
+        status="OK" if not failures else "WARN",
         message="; ".join(failures),
         retained_anchor_count=count,
         retained_span_sec=span,

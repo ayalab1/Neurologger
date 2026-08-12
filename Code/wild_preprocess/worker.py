@@ -16,7 +16,7 @@ from wild_preprocess.pc_time import PcTimeOptions, resolve_recording_start_ms
 
 
 _LAST_PROGRESS = -1.0
-WORKER_JOB_SCHEMA_VERSION = 2
+WORKER_JOB_SCHEMA_VERSION = 3
 
 
 def _recording_date_from_folder(folder: Path) -> tuple[str | None, str | None]:
@@ -36,7 +36,8 @@ def _progress(stage: str, percent: float) -> None:
     ranges = {
         "build_features": (0.0, 25.0),
         "sync_pairs": (25.0, 55.0),
-        "write_ephys": (55.0, 90.0),
+        "integrity_scan": (55.0, 60.0),
+        "write_ephys": (60.0, 90.0),
         "write_analog": (90.0, 99.0),
     }
     start, end = ranges.get(stage, (0.0, 100.0))
@@ -100,6 +101,8 @@ def _validated_job(job: dict[str, object]) -> tuple[list[Path], list[int], list[
 
 
 def run_job(job_path: Path) -> int:
+    global _LAST_PROGRESS
+    _LAST_PROGRESS = -1.0
     job = json.loads(job_path.read_text(encoding="utf-8"))
     folders, probe_indices, recording_start_anchors = _validated_job(job)
     options = SyncOptions(**job.get("sync_options", {}))
@@ -117,6 +120,8 @@ def run_job(job_path: Path) -> int:
         pc_time_options=pc_time_options,
         probe_indices=probe_indices,
         recording_start_anchors=recording_start_anchors,
+        integrity_duplication_scan=bool(job.get("integrity_duplication_scan", True)),
+        write_event_files=bool(job.get("write_event_files", False)),
     )
     sync_status = result.outputs.get("sync_status", result.status)
     merge_status = result.outputs.get("merge_status", "NOT_RUN")
@@ -138,9 +143,14 @@ def run_job(job_path: Path) -> int:
         print("Python sync QC failed; merged DAT files were not written.", file=sys.stderr)
         return 2
     _progress("complete", 100.0)
+    if sync_status == "WARN" or merge_status == "WARN":
+        print(
+            "Python outputs were published with localized synchronization or merge warnings; "
+            "affected samples are zero-filled and marked invalid in valid_samples.dat."
+        )
     if overall_status == "MERGE_ONLY":
-        print("Python sync and merge complete; native PC-time QC failed, so pc_time.dat was not published.")
-        return 3
+        print("Python sync and merge complete with a PC-time warning; pc_time.dat was not published.")
+        return 0
     print("Python multi-device sync, merge, and native PC-time generation complete.")
     return 0
 

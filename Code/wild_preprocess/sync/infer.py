@@ -2,8 +2,239 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..models import RelativeOffsetStep, SyncModel, SyncObservation, SyncOptions
-from .gaps import detect_relative_offset_steps
+from ..models import (
+    DeviceSyncAnchor,
+    DeviceSyncSegment,
+    RelativeOffsetStep,
+    SyncModel,
+    SyncObservation,
+    SyncOptions,
+    validate_device_sync_segments,
+)
+from .gaps import AdaptiveChangePoint, detect_relative_offset_steps
+
+
+def anchors_from_accepted_observations(
+    observations: list[SyncObservation],
+    fs: float,
+    options: SyncOptions,
+) -> tuple[DeviceSyncAnchor, ...]:
+    """Convert accepted, correlation-qualified observations into segment evidence.
+
+    A coarse or rejected correlation result cannot become a verified anchor just
+    because it is convenient for a later segment fit.  The source convention is
+    the established one: ``slave source = canonical master + offset``.
+    """
+
+    if not np.isfinite(fs) or fs <= 0:
+        raise ValueError("fs must be finite and positive")
+    anchors: list[DeviceSyncAnchor] = []
+    for observation in sorted(observations, key=lambda item: item.center_time_sec):
+        qualified = (
+            observation.accepted
+            and not observation.search_mode.startswith("coarse")
+            and np.isfinite(observation.observed_offset_samples)
+            and observation.peak_correlation >= options.min_peak_correlation
+            and observation.peak_to_background >= options.min_peak_to_background
+            and observation.peak_margin_fraction >= options.min_peak_margin_fraction
+        )
+        if not qualified:
+            continue
+        canonical_sample = int(round(observation.center_time_sec * fs))
+        confidence = (
+            "high"
+            if observation.peak_correlation >= max(0.1, options.min_peak_correlation)
+            and observation.peak_margin_fraction >= max(0.05, options.min_peak_margin_fraction)
+            else "medium"
+        )
+        anchors.append(
+            DeviceSyncAnchor(
+                canonical_sample=canonical_sample,
+                source_sample=float(canonical_sample + observation.observed_offset_samples),
+                verified=True,
+                confidence=confidence,
+                evidence=(
+                    f"accepted {observation.search_mode} anchor; correlation "
+                    f"{observation.peak_correlation:.3f}; margin "
+                    f"{observation.peak_margin_fraction:.3f}"
+                ),
+            )
+        )
+    # A pair of observations at exactly the same center cannot provide a
+    # two-sided affine fit; reject rather than implicitly retaining one.
+    samples = [anchor.canonical_sample for anchor in anchors]
+    if len(set(samples)) != len(samples):
+        raise ValueError("accepted anchors must have distinct canonical samples")
+    return tuple(anchors)
+
+
+def _fit_segment_affine(anchors: tuple[DeviceSyncAnchor, ...]) -> tuple[float, float, np.ndarray]:
+    """Robustly fit source = scale * canonical + intercept for one segment."""
+
+    x = np.asarray([item.canonical_sample for item in anchors], dtype=np.float64)
+    y = np.asarray([item.source_sample for item in anchors], dtype=np.float64)
+    keep = np.ones(x.size, dtype=bool)
+    coefficients = np.polyfit(x, y, 1)
+    for _ in range(6):
+        coefficients = np.polyfit(x[keep], y[keep], 1)
+        residuals = y - np.polyval(coefficients, x)
+        center = float(np.median(residuals[keep]))
+        mad = float(np.median(np.abs(residuals[keep] - center)))
+        gate = max(1e-6, 4.0 * 1.4826 * mad)
+        updated = np.abs(residuals - center) <= gate
+        if updated.sum() < 2 or np.array_equal(updated, keep):
+            break
+        keep = updated
+    coefficients = np.polyfit(x[keep], y[keep], 1)
+    return float(coefficients[0]), float(coefficients[1]), y - np.polyval(coefficients, x)
+
+
+def _change_boundaries(change_points: tuple[AdaptiveChangePoint | int, ...]) -> tuple[int, ...]:
+    boundaries: list[int] = []
+    for point in change_points:
+        boundary = point.canonical_boundary_sample if isinstance(point, AdaptiveChangePoint) else point
+        if not isinstance(boundary, int) or boundary < 0:
+            raise ValueError("change boundaries must be non-negative integer samples")
+        boundaries.append(boundary)
+    if len(set(boundaries)) != len(boundaries):
+        raise ValueError("change boundaries must be unique")
+    return tuple(sorted(boundaries))
+
+
+def fit_independent_device_segments(
+    anchors: tuple[DeviceSyncAnchor, ...] | list[DeviceSyncAnchor],
+    change_points: tuple[AdaptiveChangePoint | int, ...] | list[AdaptiveChangePoint | int],
+    *,
+    device_index: int,
+    canonical_start_sample: int,
+    canonical_end_sample: int,
+    source_sample_count: int,
+    unresolved_ranges: tuple[tuple[int, int], ...] | list[tuple[int, int]] = (),
+) -> tuple[DeviceSyncSegment, ...]:
+    """Fit independently supported device mappings between change boundaries.
+
+    Each post-boundary affine intercept is estimated solely from that range's
+    anchors.  Empty, uncertain, or under-anchored ranges are absent from the
+    result and consequently map to validity 0 at merge time.
+    """
+
+    if device_index < 1 or canonical_start_sample < 0 or canonical_end_sample <= canonical_start_sample:
+        raise ValueError("invalid device or canonical segment bounds")
+    if source_sample_count <= 0:
+        raise ValueError("source_sample_count must be positive")
+    ordered_anchors = tuple(anchors)
+    if any(not isinstance(anchor, DeviceSyncAnchor) for anchor in ordered_anchors):
+        raise ValueError("anchors must be DeviceSyncAnchor instances")
+    if tuple(anchor.canonical_sample for anchor in ordered_anchors) != tuple(
+        sorted(anchor.canonical_sample for anchor in ordered_anchors)
+    ):
+        raise ValueError("anchors must be ordered by canonical sample")
+    if len({anchor.canonical_sample for anchor in ordered_anchors}) != len(ordered_anchors):
+        raise ValueError("anchors must have unique canonical samples")
+    ranges = tuple((int(start), int(end)) for start, end in unresolved_ranges)
+    for start, end in ranges:
+        if start < canonical_start_sample or end > canonical_end_sample or end <= start:
+            raise ValueError("unresolved ranges must be non-empty and within canonical support")
+    if any(next_start < end for (_, end), (next_start, _) in zip(ranges, ranges[1:])):
+        raise ValueError("unresolved ranges must be ordered and non-overlapping")
+
+    boundaries = _change_boundaries(tuple(change_points))
+    edges = sorted(
+        {
+            canonical_start_sample,
+            canonical_end_sample,
+            *[value for value in boundaries if canonical_start_sample < value < canonical_end_sample],
+            *[value for item in ranges for value in item],
+        }
+    )
+    segments: list[DeviceSyncSegment] = []
+    for start, end in zip(edges, edges[1:]):
+        if any(start >= unresolved_start and end <= unresolved_end for unresolved_start, unresolved_end in ranges):
+            continue
+        local = tuple(
+            anchor
+            for anchor in ordered_anchors
+            if start <= anchor.canonical_sample < end and anchor.is_publishable_evidence
+        )
+        if len(local) < 2:
+            continue
+        scale, intercept, residuals = _fit_segment_affine(local)
+        if abs(scale - 1.0) <= 1e-12:
+            scale = 1.0
+        if abs(intercept) <= 1e-9:
+            intercept = 0.0
+        if not np.isfinite(scale) or scale <= 0:
+            continue
+        # Do not claim support where the independently fitted affine map has
+        # no raw source frame.  This can trim only unsupported segment ends;
+        # it never bridges a declared unresolved range.
+        supported_start = max(start, int(np.ceil((-intercept - 1e-9) / scale)))
+        supported_end = min(
+            end,
+            int(np.floor((source_sample_count - 1 - intercept + 1e-9) / scale)) + 1,
+        )
+        local = tuple(
+            anchor
+            for anchor in local
+            if supported_start <= anchor.canonical_sample < supported_end
+        )
+        if supported_end <= supported_start or len(local) < 2:
+            continue
+        scale, intercept, residuals = _fit_segment_affine(local)
+        if abs(scale - 1.0) <= 1e-12:
+            scale = 1.0
+        if abs(intercept) <= 1e-9:
+            intercept = 0.0
+        # Residual metadata must describe the exact coefficients that will be
+        # serialized and validated.  Snapping a near-unity scale can otherwise
+        # move a long-recording anchor by more than floating-point epsilon.
+        residuals = np.asarray(
+            [
+                anchor.source_sample
+                - (scale * anchor.canonical_sample + intercept)
+                for anchor in local
+            ],
+            dtype=np.float64,
+        )
+        rms = float(np.sqrt(np.mean(np.square(residuals))))
+        max_residual = float(np.max(np.abs(residuals)))
+        confidence = "high" if all(anchor.confidence == "high" for anchor in local) else "medium"
+        candidate = DeviceSyncSegment(
+                device_index=device_index,
+                canonical_start_sample=supported_start,
+                canonical_end_sample=supported_end,
+                source_start_sample=0,
+                source_end_sample=source_sample_count,
+                source_scale=scale,
+                source_intercept_samples=intercept,
+                anchors=local,
+                residual_rms_samples=rms,
+                residual_max_abs_samples=max_residual,
+                confidence=confidence,
+                start_transition=(
+                    "recording_start" if supported_start == canonical_start_sample else "independent_reacquisition"
+                ),
+                end_transition=(
+                    "recording_end" if supported_end == canonical_end_sample else "segment_boundary"
+                ),
+                publishable=True,
+                evidence="independent affine fit from verified anchors",
+            )
+        if segments:
+            previous_last = segments[-1].map_canonical_sample(
+                segments[-1].canonical_end_sample - 1
+            )
+            candidate_first = candidate.map_canonical_sample(
+                candidate.canonical_start_sample
+            )
+            if candidate_first <= previous_last:
+                # This independently fitted range would reuse or reverse raw
+                # source already claimed by a prior verified segment.  It is
+                # therefore unsupported (validity 0), not a reason to weaken
+                # the collection invariant or fail other usable devices.
+                continue
+        segments.append(candidate)
+    return validate_device_sync_segments(segments, device_index=device_index)
 
 
 def _robust_inlier_mask(x: np.ndarray, y: np.ndarray, *, constant_offset: bool) -> tuple[np.ndarray, np.ndarray]:

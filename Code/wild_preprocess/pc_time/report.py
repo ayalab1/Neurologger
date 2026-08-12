@@ -27,7 +27,7 @@ def pc_time_qc_payload(
     """Build JSON-safe metadata for the native PC-time component."""
 
     return {
-        "algorithm": "wild_preprocess.pc_time.v1",
+        "algorithm": "wild_preprocess.pc_time.v4",
         "run_id": run_id,
         "layout": layout_name,
         "anchor_source": anchor_source,
@@ -87,6 +87,52 @@ def write_pc_time_summary_png(
     ax_residual.scatter(time_sec[model.keep_mask], model.residual_ms[model.keep_mask], s=10, c="#1677b3")
     ax_residual.set_xlabel("Master device time (s)")
     ax_residual.set_ylabel("Fit residual (ms)")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
+def write_pc_time_warning_png(
+    path: Path,
+    *,
+    message: str,
+    common_start_master_sample: int,
+    n_samples: int,
+    sample_rate_hz: float,
+) -> Path:
+    """Write the retained PC-time figure when no defensible fit exists."""
+
+    import matplotlib.pyplot as plt
+
+    path = Path(path)
+    start_sec = common_start_master_sample / sample_rate_hz
+    end_sec = (common_start_master_sample + max(0, n_samples - 1)) / sample_rate_hz
+    fig, ax = plt.subplots(figsize=(12, 4.5), constrained_layout=True)
+    ax.axis("off")
+    ax.set_title("PC-time unavailable", color="#a33", fontsize=15, pad=18)
+    ax.text(
+        0.5,
+        0.62,
+        message or "No verified PC-time model could be constructed.",
+        ha="center",
+        va="center",
+        wrap=True,
+        transform=ax.transAxes,
+        fontsize=11,
+    )
+    ax.text(
+        0.5,
+        0.28,
+        (
+            f"Published canonical interval: {start_sec:.3f} to {end_sec:.3f} s\n"
+            "Neural output remains available as MERGE_ONLY; pc_time.dat was not published."
+        ),
+        ha="center",
+        va="center",
+        transform=ax.transAxes,
+        color="#555",
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150)
     plt.close(fig)

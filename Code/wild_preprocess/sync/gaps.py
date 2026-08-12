@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Sequence
 
 import numpy as np
@@ -8,12 +8,197 @@ import numpy as np
 from ..models import DeviceGap, RelativeOffsetStep, SyncObservation, SyncOptions, SyncPairResult
 
 
+@dataclass(frozen=True)
+class AdaptiveChangePoint:
+    """A locally verified relative-offset level transition."""
+
+    canonical_boundary_sample: int
+    time_sec: float
+    delta_samples: float
+    before_level_samples: float
+    after_level_samples: float
+    uncertainty_samples: float
+    before_slope_samples_per_second: float
+    after_slope_samples_per_second: float
+    confidence: str
+    before_count: int
+    after_count: int
+    evidence: str
+
+
+def _reliable_observations(
+    observations: Sequence[SyncObservation], options: SyncOptions
+) -> list[SyncObservation]:
+    """Keep anchors which still meet the original correlation gates."""
+
+    return sorted(
+        (
+            item
+            for item in observations
+            if item.accepted
+            and np.isfinite(item.observed_offset_samples)
+            and np.isfinite(item.peak_correlation)
+            and np.isfinite(item.peak_to_background)
+            and np.isfinite(item.peak_margin_fraction)
+            and item.peak_correlation >= options.min_peak_correlation
+            and item.peak_to_background >= options.min_peak_to_background
+            and item.peak_margin_fraction >= options.min_peak_margin_fraction
+        ),
+        key=lambda item: item.center_time_sec,
+    )
+
+
+def _local_detrended_level(
+    times: np.ndarray,
+    offsets: np.ndarray,
+    boundary_time: float,
+) -> tuple[float, float, np.ndarray]:
+    """Fit a local slope and return its robust level at ``boundary_time``."""
+
+    slope = float(np.polyfit(times, offsets, 1)[0]) if times.size >= 2 else 0.0
+    shifted = offsets - slope * (times - boundary_time)
+    level = float(np.median(shifted))
+    return slope, level, shifted - level
+
+
+def _estimator_uncertainty(observations: Sequence[SyncObservation]) -> float:
+    """Return recorded estimator uncertainty without inventing a loose floor."""
+
+    residuals = np.asarray(
+        [abs(item.model_residual_samples) for item in observations], dtype=np.float64
+    )
+    residuals = residuals[np.isfinite(residuals)]
+    return float(np.median(residuals)) if residuals.size else 0.0
+
+
+def detect_adaptive_change_points(
+    observations: Sequence[SyncObservation],
+    fs: float,
+    options: SyncOptions,
+    *,
+    sigma_multiplier: float = 4.0,
+) -> tuple[AdaptiveChangePoint, ...]:
+    """Detect verified local offset levels without a fixed gap-size threshold.
+
+    ``gap_min_step_samples`` remains a compatibility option, but is deliberately
+    not used here: a verified one-sample change is not correlation jitter.
+    """
+
+    if not np.isfinite(fs) or fs <= 0:
+        raise ValueError("fs must be finite and positive")
+    if not np.isfinite(sigma_multiplier) or sigma_multiplier <= 0:
+        raise ValueError("sigma_multiplier must be finite and positive")
+    accepted = _reliable_observations(observations, options)
+    persistence = max(2, int(options.gap_persistence_observations))
+    if len(accepted) < 2 * persistence:
+        return ()
+
+    times = np.asarray([item.center_time_sec for item in accepted], dtype=np.float64)
+    offsets = np.asarray([item.observed_offset_samples for item in accepted], dtype=np.float64)
+    points: list[AdaptiveChangePoint] = []
+    index = persistence
+    while index <= len(accepted) - persistence:
+        before_indices = np.arange(max(0, index - 4 * persistence), index, dtype=np.int64)
+        # Use all nearby post-candidate evidence (up to the same four-times
+        # persistence horizon as the pre-side).  Fitting a line to only two
+        # samples makes a single integer-lag jitter point look like a perfectly
+        # stable one-sample step followed by slope; the longer local side keeps
+        # verified permanent one-sample changes while rejecting those short
+        # quantization excursions.
+        after_indices = np.arange(
+            index,
+            min(len(accepted), index + 4 * persistence),
+            dtype=np.int64,
+        )
+        boundary_time = 0.5 * (times[index - 1] + times[index])
+        before_slope, before_level, before_residuals = _local_detrended_level(
+            times[before_indices], offsets[before_indices], boundary_time
+        )
+        after_slope, after_level, after_residuals = _local_detrended_level(
+            times[after_indices], offsets[after_indices], boundary_time
+        )
+        residuals = np.concatenate((before_residuals, after_residuals))
+        residual_center = float(np.median(residuals))
+        sigma = float(1.4826 * np.median(np.abs(residuals - residual_center)))
+        evidence_items = [accepted[int(item)] for item in np.concatenate((before_indices, after_indices))]
+        estimator_uncertainty = _estimator_uncertainty(evidence_items)
+        gate = max(1.0, sigma_multiplier * sigma, estimator_uncertainty)
+        before_stable = bool(np.all(np.abs(before_residuals) <= gate + 1e-12))
+        after_stable = bool(np.all(np.abs(after_residuals) <= gate + 1e-12))
+        # A change exactly at the one-sample observability floor is publishable
+        # only when both local levels are tighter than that floor.  Otherwise
+        # integer peak quantization itself can explain the apparent change.
+        before_level_spread = float(
+            np.ptp(offsets[before_indices] - before_slope * times[before_indices])
+        )
+        after_level_spread = float(
+            np.ptp(offsets[after_indices] - before_slope * times[after_indices])
+        )
+        quantization_resolved = (
+            before_level_spread < gate - 1e-12
+            and after_level_spread < gate - 1e-12
+        )
+        before_span = max(float(times[before_indices[-1]] - times[before_indices[0]]), 1e-9)
+        after_span = max(float(times[after_indices[-1]] - times[after_indices[0]]), 1e-9)
+        compatible_slopes = abs(after_slope - before_slope) <= gate / min(before_span, after_span) + 1e-12
+        regular_cadence = times[index] - times[index - 1] <= 2.0 * options.step_seconds + 1e-9
+        delta = after_level - before_level
+        if (
+            abs(delta) >= gate - 1e-12
+            and before_stable
+            and after_stable
+            and quantization_resolved
+            and compatible_slopes
+            and regular_cadence
+        ):
+            minimum_correlation = min(item.peak_correlation for item in evidence_items)
+            minimum_margin = min(item.peak_margin_fraction for item in evidence_items)
+            confidence = (
+                "high"
+                if minimum_correlation >= max(0.1, options.min_peak_correlation)
+                and minimum_margin >= max(0.05, options.min_peak_margin_fraction)
+                else "medium"
+            )
+            points.append(
+                AdaptiveChangePoint(
+                    canonical_boundary_sample=int(round(boundary_time * fs)),
+                    time_sec=float(boundary_time),
+                    delta_samples=float(delta),
+                    before_level_samples=float(before_level),
+                    after_level_samples=float(after_level),
+                    uncertainty_samples=float(gate),
+                    before_slope_samples_per_second=float(before_slope),
+                    after_slope_samples_per_second=float(after_slope),
+                    confidence=confidence,
+                    before_count=int(before_indices.size),
+                    after_count=int(after_indices.size),
+                    evidence=(
+                        f"adaptive locally detrended levels; delta {delta:+.3f}; "
+                        f"gate {gate:.3f} (1, {sigma_multiplier:.3g}*MAD {sigma:.3f}, "
+                        f"estimator {estimator_uncertainty:.3f}); "
+                        f"slopes {before_slope:.6g}/{after_slope:.6g}; "
+                        f"min correlation {minimum_correlation:.3f}; "
+                        f"min peak margin {minimum_margin:.3f}"
+                    ),
+                )
+            )
+            index += persistence
+        else:
+            index += 1
+    return tuple(points)
+
+
 def detect_relative_offset_steps(
     observations: Sequence[SyncObservation],
     fs: float,
     options: SyncOptions,
 ) -> tuple[RelativeOffsetStep, ...]:
-    """Return persistent offset levels without assuming a firmware block size."""
+    """Keep the legacy global-step projection stable until pipeline migration.
+
+    The segment API above is the generalized detector.  This compatibility
+    function intentionally retains the old operational threshold because its
+    output is still interpreted by the old cumulative global mapping.
+    """
 
     accepted = sorted(
         (observation for observation in observations if observation.accepted),
@@ -38,48 +223,28 @@ def detect_relative_offset_steps(
             recent_indices.append(index)
             index += 1
             continue
-
         candidate_indices = np.arange(index, index + persistence, dtype=np.int64)
         if persistence >= 2:
             new_coefficients = np.polyfit(times[candidate_indices], offsets[candidate_indices], 1)
         else:
-            new_coefficients = np.asarray([old_coefficients[0], offsets[index] - old_coefficients[0] * times[index]])
+            new_coefficients = np.asarray(
+                [old_coefficients[0], offsets[index] - old_coefficients[0] * times[index]]
+            )
         new_fitted = np.polyval(new_coefficients, times[candidate_indices])
-        stable_after = (
-            float(np.max(np.abs(offsets[candidate_indices] - new_fitted)))
-            <= options.gap_level_tolerance_samples
-        )
+        stable_after = float(np.max(np.abs(offsets[candidate_indices] - new_fitted))) <= options.gap_level_tolerance_samples
         slope_tolerance = options.gap_level_tolerance_samples / max(options.step_seconds, 1e-9)
         compatible_slope = abs(float(new_coefficients[0] - old_coefficients[0])) <= slope_tolerance
         boundary_time = 0.5 * (times[index - 1] + times[index])
-        # Robust plateau levels avoid extrapolating a short, partially
-        # window-straddling early sequence. Extrapolation can turn an integer
-        # 317-sample loss into 321 samples even though the stable levels are
-        # exactly 0 and 317.
         endpoint_indices = np.asarray(
-            [
-                item
-                for item in recent
-                if accepted[int(item)].search_mode.startswith("endpoint_probe")
-            ],
+            [item for item in recent if accepted[int(item)].search_mode.startswith("endpoint_probe")],
             dtype=np.int64,
         )
         if endpoint_indices.size:
             before_level = float(np.median(offsets[endpoint_indices]))
             after_level = float(np.median(offsets[candidate_indices]))
         else:
-            before_level = float(
-                np.median(
-                    offsets[recent]
-                    + old_coefficients[0] * (boundary_time - times[recent])
-                )
-            )
-            after_level = float(
-                np.median(
-                    offsets[candidate_indices]
-                    + old_coefficients[0] * (boundary_time - times[candidate_indices])
-                )
-            )
+            before_level = float(np.median(offsets[recent] + old_coefficients[0] * (boundary_time - times[recent])))
+            after_level = float(np.median(offsets[candidate_indices] + old_coefficients[0] * (boundary_time - times[candidate_indices])))
         step = after_level - before_level
         adjacent_time_gap = times[index] - times[index - 1]
         if (
@@ -88,8 +253,7 @@ def detect_relative_offset_steps(
             and compatible_slope
             and adjacent_time_gap <= 2.0 * options.step_seconds + 1e-9
         ):
-            evidence_indices = np.concatenate((recent[-persistence:], candidate_indices))
-            evidence_items = [accepted[int(item)] for item in evidence_indices]
+            evidence_items = [accepted[int(item)] for item in np.concatenate((recent[-persistence:], candidate_indices))]
             correlation = min(item.peak_correlation for item in evidence_items)
             margin = min(item.peak_margin_fraction for item in evidence_items)
             steps.append(
@@ -102,7 +266,7 @@ def detect_relative_offset_steps(
                     offset_after_samples=after_level,
                     confidence="high" if correlation >= 0.1 and margin >= 0.05 else "medium",
                     evidence=(
-                        f"persistent {persistence}-window levels; "
+                        f"legacy persistent {persistence}-window levels; "
                         f"min correlation {correlation:.3f}; min peak margin {margin:.3f}"
                     ),
                 )
@@ -579,7 +743,7 @@ def canonicalize_master_sample(
     for gap in sorted(gaps, key=lambda item: item.canonical_start_sample):
         if gap.device_index != master_device_index:
             continue
-        if gap.canonical_start_sample >= canonical_sample:
+        if gap.canonical_start_sample > canonical_sample:
             break
         canonical_sample += gap.missing_samples
     return canonical_sample
