@@ -26,3 +26,4 @@ tests/*
 change_log/
 implementation_plan/
 Firmware/*
+_codex_reference_validation/

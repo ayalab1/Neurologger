@@ -122,14 +122,19 @@ def run_job(job_path: Path) -> int:
         recording_start_anchors=recording_start_anchors,
         integrity_duplication_scan=bool(job.get("integrity_duplication_scan", True)),
         write_event_files=bool(job.get("write_event_files", False)),
+        process_imu=bool(job.get("process_imu", False)),
     )
     sync_status = result.outputs.get("sync_status", result.status)
     merge_status = result.outputs.get("merge_status", "NOT_RUN")
+    analog_status = result.outputs.get("analog_status", "NOT_RUN")
     pc_time_status = result.outputs.get("pc_time_status", "NOT_RUN")
+    imu_status = result.outputs.get("imu_status", "NOT_RUN")
     overall_status = result.outputs.get("overall_status", "FAIL" if result.status == "FAIL" else "COMPLETE")
     print(f"sync_status={sync_status}")
     print(f"merge_status={merge_status}")
+    print(f"analog_status={analog_status}")
     print(f"pc_time_status={pc_time_status}")
+    print(f"imu_status={imu_status}")
     print(f"overall_status={overall_status}")
     for pair in result.pairs:
         print(
@@ -143,15 +148,22 @@ def run_job(job_path: Path) -> int:
         print("Python sync QC failed; merged DAT files were not written.", file=sys.stderr)
         return 2
     _progress("complete", 100.0)
-    if sync_status == "WARN" or merge_status == "WARN":
+    if sync_status == "WARN" or merge_status == "WARN" or analog_status == "WARN":
         print(
             "Python outputs were published with localized synchronization or merge warnings; "
-            "affected samples are zero-filled and marked invalid in valid_samples.dat."
+            "affected neural/analog samples are zero-filled and marked in their validity files."
         )
     if overall_status == "MERGE_ONLY":
         print("Python sync and merge complete with a PC-time warning; pc_time.dat was not published.")
         return 0
-    print("Python multi-device sync, merge, and native PC-time generation complete.")
+    imu_text = (
+        ", and synchronized IMU"
+        if imu_status == "OK"
+        else ", and synchronized IMU with localized warnings"
+        if imu_status == "WARN"
+        else ""
+    )
+    print(f"Python multi-device sync, merge, native PC-time{imu_text} generation complete.")
     return 0
 
 

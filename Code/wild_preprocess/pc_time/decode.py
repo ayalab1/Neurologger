@@ -6,7 +6,7 @@ import re
 import struct
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import overload
+from typing import Callable, Sequence, overload
 
 import numpy as np
 
@@ -44,6 +44,34 @@ class PackedUpdateDiagnostics:
 
     def to_dict(self) -> dict[str, int]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class PackedUpdates:
+    """Stable packed-clock updates in raw analog-row coordinates.
+
+    ``raw_row_indices`` are zero-based source rows: 16-word CE64 raw-misc
+    cycles for :data:`CE64_RAW_MISC_LAYOUT`, or expanded analog frames for
+    :data:`EXPANDED_ANALOG_LAYOUT`.  They are deliberately not multiplied by
+    an ephys expansion factor.  Both arrays are copied and made read-only so
+    the decoded evidence can safely be shared with a later analog mapping.
+    """
+
+    raw_row_indices: np.ndarray
+    values: np.ndarray
+    diagnostics: PackedUpdateDiagnostics
+
+    def __post_init__(self) -> None:
+        rows = np.array(self.raw_row_indices, dtype=np.int64, copy=True)
+        values = np.array(self.values, dtype=np.uint32, copy=True)
+        if rows.ndim != 1 or values.ndim != 1 or rows.size != values.size:
+            raise ValueError("packed raw-row indices and values must be equal-length one-dimensional arrays")
+        if np.any(rows < 0) or (rows.size > 1 and np.any(np.diff(rows) <= 0)):
+            raise ValueError("packed raw-row indices must be non-negative and strictly increasing")
+        rows.flags.writeable = False
+        values.flags.writeable = False
+        object.__setattr__(self, "raw_row_indices", rows)
+        object.__setattr__(self, "values", values)
 
 
 CE64_RAW_MISC_LAYOUT = PcTimeLayout(name="ce64-raw-misc", raw_misc=True)
@@ -164,6 +192,122 @@ def _packed_updates_from_words(
     )
 
 
+def _normalise_valid_raw_runs(
+    n_rows: int,
+    *,
+    valid_raw_runs: Sequence[tuple[int, int]] | None,
+    raw_valid_mask: np.ndarray | Sequence[bool] | None,
+) -> tuple[tuple[int, int], ...]:
+    """Return deterministic, merged half-open valid source-row runs."""
+
+    if valid_raw_runs is not None and raw_valid_mask is not None:
+        raise ValueError("specify either valid_raw_runs or raw_valid_mask, not both")
+    if raw_valid_mask is not None:
+        mask = np.asarray(raw_valid_mask)
+        if mask.ndim != 1 or mask.size != n_rows or mask.dtype != np.bool_:
+            raise ValueError("raw_valid_mask must be a one-dimensional boolean array matching raw rows")
+        starts = np.flatnonzero(mask & np.r_[True, ~mask[:-1]])
+        ends = np.flatnonzero(mask & np.r_[~mask[1:], True]) + 1
+        return tuple((int(start), int(end)) for start, end in zip(starts, ends))
+    if valid_raw_runs is None:
+        return ((0, n_rows),)
+
+    normalized: list[tuple[int, int]] = []
+    for item in valid_raw_runs:
+        if len(item) != 2:
+            raise ValueError("valid_raw_runs entries must be (start, end) half-open pairs")
+        start, end = (int(item[0]), int(item[1]))
+        if start < 0 or end > n_rows or start >= end:
+            raise ValueError("valid_raw_runs must be non-empty half-open intervals within raw rows")
+        normalized.append((start, end))
+    normalized.sort()
+    merged: list[tuple[int, int]] = []
+    for start, end in normalized:
+        if merged and start < merged[-1][1]:
+            raise ValueError("valid_raw_runs must not overlap")
+        if merged and start == merged[-1][1]:
+            merged[-1] = (merged[-1][0], end)
+        else:
+            merged.append((start, end))
+    return tuple(merged)
+
+
+def _collect_packed_update_rows_streaming(
+    n_rows: int,
+    read_packed_rows: Callable[[int, int], np.ndarray],
+    *,
+    valid_raw_runs: Sequence[tuple[int, int]] | None,
+    raw_valid_mask: np.ndarray | Sequence[bool] | None,
+    minimum_stable_cycles: int,
+    chunk_rows: int,
+) -> PackedUpdates:
+    """Decode valid source runs with bounded memory and no gap bridging."""
+
+    runs = _normalise_valid_raw_runs(
+        n_rows,
+        valid_raw_runs=valid_raw_runs,
+        raw_valid_mask=raw_valid_mask,
+    )
+    row_parts: list[np.ndarray] = []
+    value_parts: list[np.ndarray] = []
+    candidate_count = 0
+    accepted_count = 0
+    rejected_count = 0
+    for start, end in runs:
+        run_value: int | None = None
+        run_start = start
+        run_length = 0
+        previous_accepted_value: int | None = None
+
+        def finish_run() -> None:
+            nonlocal candidate_count, accepted_count, previous_accepted_value, rejected_count
+            if run_value is None or run_value == 0:
+                return
+            candidate_count += 1
+            if run_length < minimum_stable_cycles:
+                rejected_count += 1
+                return
+            if previous_accepted_value == run_value:
+                return
+            row_parts.append(np.asarray([run_start], dtype=np.int64))
+            value_parts.append(np.asarray([run_value], dtype=np.uint32))
+            accepted_count += 1
+            previous_accepted_value = run_value
+
+        for chunk_start in range(start, end, chunk_rows):
+            chunk_end = min(chunk_start + chunk_rows, end)
+            packed = np.asarray(read_packed_rows(chunk_start, chunk_end), dtype=np.uint32)
+            if packed.ndim != 1 or packed.size != chunk_end - chunk_start:
+                raise ValueError("packed-row reader returned an unexpected shape")
+            change_starts = np.r_[0, np.flatnonzero(packed[1:] != packed[:-1]) + 1]
+            change_ends = np.r_[change_starts[1:], packed.size]
+            for local_start, local_end in zip(change_starts, change_ends):
+                value = int(packed[local_start])
+                length = int(local_end - local_start)
+                absolute_start = chunk_start + int(local_start)
+                if run_value == value:
+                    run_length += length
+                    continue
+                finish_run()
+                run_value = value
+                run_start = absolute_start
+                run_length = length
+            # A valid run is deliberately not finalized at a chunk boundary.
+        finish_run()
+    raw_rows = np.concatenate(row_parts) if row_parts else np.empty(0, dtype=np.int64)
+    values = np.concatenate(value_parts) if value_parts else np.empty(0, dtype=np.uint32)
+    return PackedUpdates(
+        raw_rows,
+        values,
+        PackedUpdateDiagnostics(
+            raw_candidate_run_count=candidate_count,
+            accepted_update_count=accepted_count,
+            rejected_unstable_run_count=rejected_count,
+            minimum_stable_cycles=minimum_stable_cycles,
+        ),
+    )
+
+
 @overload
 def collect_packed_updates(
     analog_path: Path,
@@ -224,6 +368,85 @@ def collect_packed_updates(
         indices = np.arange(words.shape[0], dtype=np.int64)
         result = _packed_updates_from_words(np.asarray(lanes), indices)
         return result if return_diagnostics else result[:2]
+    finally:
+        mmap = getattr(words, "_mmap", None)
+        if mmap is not None:
+            mmap.close()
+
+
+def collect_packed_update_rows(
+    analog_path: Path,
+    layout: PcTimeLayout = CE64_RAW_MISC_LAYOUT,
+    *,
+    valid_raw_runs: Sequence[tuple[int, int]] | None = None,
+    raw_valid_mask: np.ndarray | Sequence[bool] | None = None,
+    minimum_stable_cycles: int = 2,
+    chunk_rows: int = 1_000_000,
+) -> PackedUpdates:
+    """Return immutable stable updates on raw analog-row coordinates.
+
+    Valid source intervals are half-open ``[start, end)`` raw-row intervals.
+    Alternatively, ``raw_valid_mask`` supplies one boolean per raw source row.
+    Each valid run is decoded independently: a packed value held on both sides
+    of an invalid overwrite/reorder region never becomes one stable update.
+    ``chunk_rows`` bounds decoder working memory and exists mainly for testing;
+    it does not change the resulting updates or diagnostics.
+
+    The existing :func:`collect_packed_updates` remains the legacy interface
+    for ephys-expanded CE64 coordinates and is intentionally unchanged.
+    """
+
+    if int(minimum_stable_cycles) < 1:
+        raise ValueError("minimum_stable_cycles must be positive")
+    if int(chunk_rows) < 1:
+        raise ValueError("chunk_rows must be positive")
+    analog_path = Path(analog_path)
+    size = analog_path.stat().st_size
+    if layout.raw_misc:
+        cycle_bytes = layout.raw_words_per_cycle * 2
+        if cycle_bytes <= 0 or RAW_MISC_BLOCK_BYTES % cycle_bytes:
+            raise ValueError("raw words per cycle must divide 512-byte raw-misc blocks")
+        if size == 0 or size % RAW_MISC_BLOCK_BYTES:
+            raise ValueError("raw-misc analogin.dat length must be a non-zero multiple of 512 bytes")
+        words = np.memmap(analog_path, dtype="<u2", mode="r")
+        try:
+            cycles = words.reshape(-1, layout.raw_words_per_cycle)
+            def read_packed_rows(start: int, end: int) -> np.ndarray:
+                low = cycles[start:end, layout.raw_low_word_index].astype(np.uint32)
+                high = cycles[start:end, layout.raw_high_word_index].astype(np.uint32)
+                return low | (high << 16)
+
+            return _collect_packed_update_rows_streaming(
+                int(cycles.shape[0]),
+                read_packed_rows,
+                valid_raw_runs=valid_raw_runs,
+                raw_valid_mask=raw_valid_mask,
+                minimum_stable_cycles=int(minimum_stable_cycles),
+                chunk_rows=int(chunk_rows),
+            )
+        finally:
+            mmap = getattr(words, "_mmap", None)
+            if mmap is not None:
+                mmap.close()
+    frame_bytes = layout.expanded_channel_count * 2
+    if size == 0 or size % frame_bytes:
+        raise ValueError("expanded analogin.dat length must be a non-zero whole number of frames")
+    words = np.memmap(analog_path, dtype="<u2", mode="r")
+    try:
+        frames = words.reshape(-1, layout.expanded_channel_count)
+        def read_packed_rows(start: int, end: int) -> np.ndarray:
+            low = frames[start:end, layout.expanded_low_channel_index].astype(np.uint32)
+            high = frames[start:end, layout.expanded_high_channel_index].astype(np.uint32)
+            return low | (high << 16)
+
+        return _collect_packed_update_rows_streaming(
+            int(frames.shape[0]),
+            read_packed_rows,
+            valid_raw_runs=valid_raw_runs,
+            raw_valid_mask=raw_valid_mask,
+            minimum_stable_cycles=int(minimum_stable_cycles),
+            chunk_rows=int(chunk_rows),
+        )
     finally:
         mmap = getattr(words, "_mmap", None)
         if mmap is not None:

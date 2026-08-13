@@ -8,8 +8,10 @@ temporarily for callers which still have an already-generated raw-master file.
 from .decode import (
     CE64_RAW_MISC_LAYOUT,
     EXPANDED_ANALOG_LAYOUT,
+    PackedUpdates,
     PackedUpdateDiagnostics,
     PcTimeLayout,
+    collect_packed_update_rows,
     collect_packed_updates,
     infer_recording_start_from_name,
     resolve_recording_start_ms,
@@ -33,21 +35,31 @@ from .canonical import (
     validate_canonical_pc_time_interval,
     write_canonical_interval_pc_time,
 )
+from .analog_mapping import (
+    AnalogPcTimeMappingDiagnostics,
+    CanonicalAnalogPcTimeFit,
+    fit_pc_time_through_analog_mapping,
+)
 
 __all__ = [
     "CE64_RAW_MISC_LAYOUT",
     "CameraTimestampMapping",
     "CanonicalPcTimeFit",
+    "CanonicalAnalogPcTimeFit",
     "EXPANDED_ANALOG_LAYOUT",
+    "PackedUpdates",
+    "AnalogPcTimeMappingDiagnostics",
     "PackedUpdateDiagnostics",
     "PcTimeLayout",
     "PcTimeModel",
     "PcTimeOptions",
     "PcTimeValidation",
     "align_pc_time_file",
+    "collect_packed_update_rows",
     "collect_packed_updates",
     "fit_robust_pc_time_model",
     "fit_gap_aware_pc_time_model",
+    "fit_pc_time_through_analog_mapping",
     "infer_recording_start_from_name",
     "map_camera_timestamps_to_canonical",
     "map_raw_master_indices_to_canonical",

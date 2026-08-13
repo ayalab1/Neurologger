@@ -152,12 +152,20 @@ def _published_python_run_summary(manifest: dict[str, Any] | None) -> tuple[bool
     overall = str(manifest.get("overall_status", "")).upper()
     sync = str(manifest.get("sync_status", "")).upper()
     merge = str(manifest.get("merge_status", "")).upper()
+    analog = str(manifest.get("analog_status", "")).upper()
     pc_time = str(manifest.get("pc_time_status", "")).upper()
+    imu = str(manifest.get("imu_status", "")).upper()
     if overall not in {"COMPLETE", "MERGE_ONLY"}:
         return False, f"not published ({overall or 'unknown'})"
     warning_components = [
         name
-        for name, value in (("sync", sync), ("merge", merge), ("PC-time", pc_time))
+        for name, value in (
+            ("sync", sync),
+            ("merge", merge),
+            ("analog", analog),
+            ("PC-time", pc_time),
+            ("IMU", imu),
+        )
         if value == "WARN"
     ]
     if overall == "MERGE_ONLY" and "PC-time" not in warning_components:
@@ -658,6 +666,12 @@ def main() -> int:
             self.generate_lfp.setChecked(False)
             self.generate_lfp.setEnabled(True)
             self.generate_lfp.setToolTip("Requested LFP generation. For 3+ loggers this waits until reviewed merged dat writing is enabled.")
+            self.generate_imu = QCheckBox("generate synchronized IMU")
+            self.generate_imu.setChecked(False)
+            self.generate_imu.setToolTip(
+                "Create IMU.mat with MATLAB-compatible calibration and sensor fusion from the "
+                "synchronized merged analogin.dat and its analog validity mask."
+            )
             self.progress_label = QLabel("Idle")
             self.progress_bar = QProgressBar()
             self.progress_bar.setRange(0, 100)
@@ -669,10 +683,11 @@ def main() -> int:
             force_stop.setObjectName("dangerButton")
             force_stop.clicked.connect(self._force_stop)
             run_grid.addWidget(self.generate_lfp, 0, 0, 1, 2)
-            run_grid.addWidget(self.progress_label, 1, 0, 1, 2)
-            run_grid.addWidget(self.progress_bar, 2, 0, 1, 2)
-            run_grid.addWidget(run_selected, 3, 0)
-            run_grid.addWidget(force_stop, 3, 1)
+            run_grid.addWidget(self.generate_imu, 1, 0, 1, 2)
+            run_grid.addWidget(self.progress_label, 2, 0, 1, 2)
+            run_grid.addWidget(self.progress_bar, 3, 0, 1, 2)
+            run_grid.addWidget(run_selected, 4, 0)
+            run_grid.addWidget(force_stop, 4, 1)
 
             layout.addWidget(session)
             layout.addWidget(run)
@@ -971,11 +986,12 @@ def main() -> int:
             # explicit MATLAB fallback continues into the legacy script.
             self._continue_after_sync_qc = SYNC_BACKEND == "matlab"
             lfp_text = " with LFP requested" if self.generate_lfp.isChecked() else ""
+            imu_text = " and synchronized IMU" if self.generate_imu.isChecked() else ""
             if SYNC_BACKEND == "matlab":
                 pipeline_text = "logger synchronization check, master pc_time.dat generation, then legacy 2-logger merge"
             else:
                 pipeline_text = "Python logger synchronization, merge, post-merge QC, and native master pc_time.dat generation"
-            self._append_log("Run pipeline: " + pipeline_text + lfp_text + ".")
+            self._append_log("Run pipeline: " + pipeline_text + imu_text + lfp_text + ".")
             self._set_progress("Starting", 0)
             if len(selected) >= 2:
                 self._start_logger_sync_qc()
@@ -1122,6 +1138,7 @@ def main() -> int:
                 "merge": True,
                 "sync_options": {"chunk_seconds": 5.0},
                 "pc_time_options": {},
+                "process_imu": self.generate_imu.isChecked(),
             }
             handle = tempfile.NamedTemporaryFile(
                 mode="w",
@@ -1198,7 +1215,9 @@ def main() -> int:
                             f"{manifest.get('overall_status', 'unknown')} "
                             f"(sync={manifest.get('sync_status', 'unknown')}, "
                             f"merge={manifest.get('merge_status', 'unknown')}, "
-                            f"pc_time={manifest.get('pc_time_status', 'unknown')})."
+                            f"analog={manifest.get('analog_status', 'unknown')}, "
+                            f"pc_time={manifest.get('pc_time_status', 'unknown')}, "
+                            f"imu={manifest.get('imu_status', 'unknown')})."
                         )
                     except (OSError, json.JSONDecodeError) as exc:
                         self._append_log(f"Could not read Python run manifest: {exc}")

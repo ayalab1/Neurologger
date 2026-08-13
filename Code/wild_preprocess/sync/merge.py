@@ -5,12 +5,21 @@ import os
 import shutil
 import tempfile
 from contextlib import ExitStack
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
 import numpy as np
 
 from ..binary_io import atomic_output_path, close_memmap, interleaved_memmap, replace_atomic
+from ..analog import (
+    IMU_MODALITY_INVALID_KINDS,
+    AnalogIntegrityResult,
+    AnalogTimelineResult,
+    DeviceClockPrior,
+    build_event_driven_analog_segments,
+    write_canonical_analog,
+)
 from ..models import (
     ClassifiedInterval,
     DeviceGap,
@@ -759,6 +768,8 @@ def _collect_events(
     classified_intervals: list[ClassifiedInterval] | None = None,
     device_terminal_support: list[DeviceTerminalSupport] | None = None,
     write_event_files: bool = False,
+    analog_validity_path: Path | None = None,
+    master_index: int = 0,
 ) -> list[dict[str, object]]:
     mapped = interleaved_memmap(analog_path, total_analog_channels, analog_samples)
     published_output_folder = output_folder if published_output_folder is None else published_output_folder
@@ -767,9 +778,30 @@ def _collect_events(
     intervals_by_device = _device_interval_map(list(classified_intervals or ()))
     terminal_by_device = _device_terminal_map(list(device_terminal_support or ()))
     block_start = 0
+    analog_validity = (
+        np.memmap(
+            analog_validity_path,
+            dtype=np.uint8,
+            mode="r",
+            shape=(analog_samples, len(recordings)),
+        )
+        if analog_validity_path is not None and analog_validity_path.exists()
+        else None
+    )
+    validity_channel_by_device = {
+        device: channel
+        for channel, device in enumerate(_validity_device_order(recordings, master_index))
+    }
     try:
         for device_index, recording in enumerate(recordings, start=1):
             digital = np.asarray(mapped[:, block_start], dtype=np.uint16)
+            device_valid = (
+                np.asarray(
+                    analog_validity[:, validity_channel_by_device[device_index - 1]] != 0
+                )
+                if analog_validity is not None
+                else np.ones(analog_samples, dtype=bool)
+            )
             gap_edges: list[int] = []
             for gap in gaps_by_device.get(device_index - 1, ()):
                 gap_edges.extend(
@@ -798,13 +830,27 @@ def _collect_events(
                 )
             for bit_index in range(16):
                 state = ((digital >> bit_index) & 1).astype(np.int8)
-                transitions = np.diff(np.concatenate(([0], state, [0])))
-                starts = np.flatnonzero(transitions == 1)
-                ends = np.flatnonzero(transitions == -1)
-                count = min(starts.size, ends.size)
-                candidate_pairs = [
-                    (int(start), int(end)) for start, end in zip(starts[:count], ends[:count])
-                ]
+                valid_starts = np.flatnonzero(device_valid & np.r_[True, ~device_valid[:-1]])
+                valid_ends = np.flatnonzero(device_valid & np.r_[~device_valid[1:], True]) + 1
+                candidate_pairs: list[tuple[int, int]] = []
+                for valid_start, valid_end in zip(valid_starts, valid_ends):
+                    # Reset the digital state at every invalid boundary.  Edge
+                    # states themselves are not emitted, preventing zero-fill
+                    # from creating artificial events.
+                    run = state[valid_start:valid_end]
+                    if run.size < 2:
+                        continue
+                    transitions = np.diff(run)
+                    starts = valid_start + np.flatnonzero(transitions == 1) + 1
+                    ends = valid_start + np.flatnonzero(transitions == -1) + 1
+                    end_index = 0
+                    for start in starts:
+                        while end_index < ends.size and ends[end_index] <= start:
+                            end_index += 1
+                        if end_index >= ends.size:
+                            break
+                        candidate_pairs.append((int(start), int(ends[end_index])))
+                        end_index += 1
                 paired = [
                     (start, end)
                     for start, end in candidate_pairs
@@ -842,6 +888,8 @@ def _collect_events(
             block_start += recording.analog_channels
     finally:
         close_memmap(mapped)
+        if analog_validity is not None:
+            close_memmap(analog_validity)
     return rows
 
 
@@ -899,6 +947,8 @@ def _merge_recordings_into_folder(
     preserve_device_tails: bool = False,
     write_event_files: bool = False,
     device_sync_segments: list[DeviceSyncSegment] | None = None,
+    analog_integrity_results: list[AnalogIntegrityResult] | None = None,
+    analog_clock_priors: list[DeviceClockPrior] | None = None,
     timing: TimingCallback | None = None,
 ) -> dict[str, str]:
     output_folder.mkdir(parents=True, exist_ok=True)
@@ -934,6 +984,7 @@ def _merge_recordings_into_folder(
     validate_time_dat_length(common_end - common_start + 1)
     amplifier_path = output_folder / "amplifier.dat"
     analog_path = output_folder / "analogin.dat"
+    analog_validity_path = output_folder / "valid_analog_samples.dat"
     time_path = output_folder / "time.dat"
     validity_path = output_folder / "valid_samples.dat"
     internal_merge_path = output_folder / ".wild_internal_merge.json"
@@ -971,33 +1022,157 @@ def _merge_recordings_into_folder(
                 0,
                 amplifier_path.stat().st_size + validity_path.stat().st_size,
             )
+    analog_timelines: list[AnalogTimelineResult] = []
     if timing is not None:
         timing("analog_merge", "start", 0, 0)
     try:
-        analog_samples, total_analog_channels = _write_interleaved_stream(
-            analog_path,
-            recordings,
-            models,
-            master_index,
-            common_start,
-            common_end,
-            stream="analog",
-            chunk_seconds=chunk_seconds,
-            overwrite=overwrite,
-            progress=progress,
-            device_gaps=device_gaps,
-            classified_intervals=classified_intervals,
-            device_source_steps=device_source_steps,
-            device_terminal_support=device_terminal_support,
-            device_sync_segments=device_sync_segments,
-        )
+        if analog_integrity_results is not None or analog_clock_priors is not None:
+            if analog_integrity_results is None or analog_clock_priors is None:
+                raise ValueError("analog integrity results and clock priors must be supplied together")
+            if len(analog_integrity_results) != len(recordings) or len(analog_clock_priors) != len(recordings):
+                raise ValueError("analog integrity/prior collections must align with recordings")
+            master_fs = float(recordings[master_index].fs)
+            analog_samples = int(
+                np.floor((common_end - common_start) / (master_fs / ANALOG_FS))
+            ) + 1
+            analog_segments_by_device: dict[int, tuple] = {}
+            for device_index, (recording, integrity, prior) in enumerate(
+                zip(recordings, analog_integrity_results, analog_clock_priors), start=1
+            ):
+                if integrity.device_index != device_index or prior.device_index != device_index:
+                    raise ValueError("analog evidence device order does not match recordings")
+                prior = replace(prior, canonical_ephys_start_sample=float(common_start))
+                temporal_decisions = tuple(
+                    event
+                    for event in integrity.timeline_events
+                    if event.kind != "counter_corruption"
+                )
+                segments = build_event_driven_analog_segments(
+                    prior,
+                    canonical_start_row=0,
+                    canonical_end_row=analog_samples,
+                    raw_row_count=recording.analog_samples,
+                    decisions=temporal_decisions,
+                )
+                analog_segments_by_device[device_index] = segments
+                integrity_warning_count = len(integrity.events)
+                has_publishable_support = any(
+                    segment.publishable for segment in segments
+                )
+                publishable_coverage = sum(
+                    segment.canonical_end_row - segment.canonical_start_row
+                    for segment in segments
+                    if segment.publishable
+                )
+                has_complete_publishable_coverage = (
+                    has_publishable_support
+                    and publishable_coverage == analog_samples
+                )
+                analog_timelines.append(
+                    AnalogTimelineResult(
+                        device_index=device_index,
+                        segments=segments,
+                        integrity_events=integrity.events,
+                        status=(
+                            "OK"
+                            if integrity_warning_count == 0
+                            and has_complete_publishable_coverage
+                            else "WARN"
+                        ),
+                        warnings=(
+                            ()
+                            if integrity_warning_count == 0
+                            and has_complete_publishable_coverage
+                            else (
+                                (
+                                    f"{integrity_warning_count} analog integrity event(s)"
+                                    if integrity_warning_count
+                                    else (
+                                        "no publishable analog source support"
+                                        if not has_publishable_support
+                                        else (
+                                            "publishable analog source support covers "
+                                            f"{publishable_coverage}/{analog_samples} canonical rows"
+                                        )
+                                    )
+                                ),
+                            )
+                        ),
+                        phase_ephys_samples=prior.phase_ephys_samples,
+                        source_raw_row_count=recording.analog_samples,
+                        clock_prior=prior,
+                    )
+                )
+            master_segments = analog_segments_by_device[master_index + 1]
+            if not any(segment.publishable for segment in master_segments):
+                raise ValueError(
+                    "canonical master analog mapping has no publishable source support"
+                )
+            analog_result = write_canonical_analog(
+                recordings,
+                analog_segments_by_device,
+                master_index=master_index,
+                canonical_rows=analog_samples,
+                analog_path=analog_path,
+                validity_path=analog_validity_path,
+                chunk_rows=max(1, round(chunk_seconds * ANALOG_FS)),
+                overwrite=overwrite,
+                progress=progress,
+                invalid_lane_intervals_by_device={
+                    device_index: {
+                        lane: tuple(
+                            (event.raw_start_row, event.raw_end_row)
+                            for event in integrity.events
+                            if event.kind
+                            in ({"counter_corruption"} | IMU_MODALITY_INVALID_KINDS)
+                            and lane in event.affected_lanes
+                        )
+                        for lane in range(recording.analog_channels)
+                        if any(
+                            event.kind
+                            in ({"counter_corruption"} | IMU_MODALITY_INVALID_KINDS)
+                            and lane in event.affected_lanes
+                            for event in integrity.events
+                        )
+                    }
+                    for device_index, (recording, integrity) in enumerate(
+                        zip(recordings, analog_integrity_results), start=1
+                    )
+                },
+                staged=True,
+            )
+            total_analog_channels = analog_result.channels_per_device * len(recordings)
+        else:
+            analog_samples, total_analog_channels = _write_interleaved_stream(
+                analog_path,
+                recordings,
+                models,
+                master_index,
+                common_start,
+                common_end,
+                stream="analog",
+                chunk_seconds=chunk_seconds,
+                overwrite=overwrite,
+                progress=progress,
+                device_gaps=device_gaps,
+                classified_intervals=classified_intervals,
+                device_source_steps=device_source_steps,
+                device_terminal_support=device_terminal_support,
+                device_sync_segments=device_sync_segments,
+            )
     except BaseException:
         if timing is not None:
             timing("analog_merge", "failed", 0, 0)
         raise
     else:
         if timing is not None:
-            timing("analog_merge", "complete", 0, analog_path.stat().st_size)
+            timing(
+                "analog_merge",
+                "complete",
+                0,
+                analog_path.stat().st_size
+                + (analog_validity_path.stat().st_size if analog_validity_path.exists() else 0),
+            )
     validity_summary = _validity_summary(validity_path, ephys_samples, len(recordings))
     _write_time_dat(time_path, ephys_samples, overwrite)
     channel_layout = _channel_layout_records(recordings, master_index)
@@ -1009,12 +1184,14 @@ def _merge_recordings_into_folder(
         total_analog_channels,
         overwrite,
         published_output_folder=published_output_folder,
-        device_gaps=device_gaps,
+        device_gaps=([] if analog_timelines else device_gaps),
         common_start=common_start,
         fs=recordings[master_index].fs,
-        classified_intervals=classified_intervals,
-        device_terminal_support=device_terminal_support,
+        classified_intervals=([] if analog_timelines else classified_intervals),
+        device_terminal_support=([] if analog_timelines else device_terminal_support),
         write_event_files=write_event_files,
+        analog_validity_path=(analog_validity_path if analog_validity_path.exists() else None),
+        master_index=master_index,
     )
 
     def mapped_ephys_sample(
@@ -1083,6 +1260,41 @@ def _merge_recordings_into_folder(
         ],
         "analog_samples": analog_samples,
         "analog_channels": total_analog_channels,
+        "analog_status": (
+            "NOT_RUN"
+            if not analog_timelines
+            else ("WARN" if any(item.status == "WARN" for item in analog_timelines) else "OK")
+        ),
+        "analog_timelines": [item.to_dict() for item in analog_timelines],
+        "analog_validity_samples_file": (
+            analog_validity_path.name if analog_validity_path.exists() else None
+        ),
+        "analog_validity_samples_dtype": (
+            "uint8" if analog_validity_path.exists() else None
+        ),
+        "analog_validity_samples_shape": (
+            [analog_samples, len(recordings)] if analog_validity_path.exists() else None
+        ),
+        "analog_channel_device_order": [
+            {
+                "block": block,
+                "device_index": device_index + 1,
+                "device_name": recordings[device_index].device_name,
+                "channel_start_zero_based": block * 16,
+                "channel_count": 16,
+            }
+            for block, device_index in enumerate(range(len(recordings)))
+        ],
+        "analog_validity_device_order": [
+            {
+                "channel": validity_channel,
+                "device_index": device_index + 1,
+                "device_name": recordings[device_index].device_name,
+            }
+            for validity_channel, device_index in enumerate(
+                _validity_device_order(recordings, master_index)
+            )
+        ],
         "event_files_written": write_event_files,
         "digital_events": event_summary,
         "channel_layout": channel_layout,
@@ -1091,6 +1303,11 @@ def _merge_recordings_into_folder(
             "analog": analog_path.name,
             "time": time_path.name,
             "validity": validity_path.name,
+            **(
+                {"analog_validity": analog_validity_path.name}
+                if analog_validity_path.exists()
+                else {}
+            ),
         },
         "common_interval_limits": common_interval_limits,
         "coordinate_system": "canonical_gap_aware_ephys_samples",
@@ -1120,7 +1337,7 @@ def _merge_recordings_into_folder(
             else []
         ),
         "segment_mapping_authoritative": device_sync_segments is not None,
-        "imu_status": "not generated by the Python multi-device backend",
+        "imu_status": "NOT_RUN",
         "devices": [
             {
                 "folder": str(recording.folder),
@@ -1155,6 +1372,11 @@ def _merge_recordings_into_folder(
         "analog": str(analog_path),
         "time": str(time_path),
         "validity": str(validity_path),
+        **(
+            {"analog_validity": str(analog_validity_path)}
+            if analog_validity_path.exists()
+            else {}
+        ),
         "_merge_internal": str(internal_merge_path),
     }
 
@@ -1182,6 +1404,8 @@ def merge_recordings(
     preserve_device_tails: bool = False,
     write_event_files: bool = False,
     device_sync_segments: list[DeviceSyncSegment] | None = None,
+    analog_integrity_results: list[AnalogIntegrityResult] | None = None,
+    analog_clock_priors: list[DeviceClockPrior] | None = None,
     timing: TimingCallback | None = None,
 ) -> dict[str, str]:
     """Stage a complete merged dataset before replacing session-level files.
@@ -1203,6 +1427,8 @@ def merge_recordings(
         "time.dat",
         "valid_samples.dat",
     }
+    if analog_integrity_results is not None or analog_clock_priors is not None:
+        fixed_names.add("valid_analog_samples.dat")
     legacy_python_metadata_names = {
         "wild_preprocess_channel_layout.tsv",
         "wild_multilogger_events.tsv",
@@ -1268,6 +1494,8 @@ def merge_recordings(
             preserve_device_tails=preserve_device_tails,
             write_event_files=write_event_files,
             device_sync_segments=device_sync_segments,
+            analog_integrity_results=analog_integrity_results,
+            analog_clock_priors=analog_clock_priors,
             timing=timing,
         )
         if stage_callback is not None:

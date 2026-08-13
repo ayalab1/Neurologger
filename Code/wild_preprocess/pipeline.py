@@ -17,6 +17,16 @@ from typing import Callable, Iterable
 
 from .binary_io import close_memmap, read_ce_params_metadata, recordings_from_folders
 from .audit import RawAuditOptions, scan_exact_duplications
+from .analog import (
+    AnalogIntegrityResult,
+    DeviceClockPrior,
+    IMU_MODALITY_INVALID_KINDS,
+    build_event_driven_analog_segments,
+    build_imu_from_merged,
+    project_raw_imu_intervals_to_canonical,
+    scan_analog_integrity,
+    write_synchronized_imu_mat,
+)
 from .inspection import write_session_inspection_png
 from .integrity import (
     device_gaps_to_intervals,
@@ -74,7 +84,9 @@ from .version import PIPELINE_ALGORITHM_VERSION, RUN_MANIFEST_SCHEMA_VERSION, SY
 from .pc_time import (
     CE64_RAW_MISC_LAYOUT,
     PcTimeOptions,
+    collect_packed_update_rows,
     collect_packed_updates,
+    fit_pc_time_through_analog_mapping,
     fit_gap_aware_pc_time_model,
     pc_time_qc_payload,
     resolve_recording_start_ms,
@@ -664,6 +676,7 @@ def run_multidevice_sync(
     recording_start_anchors: list[dict[str, object]] | None = None,
     integrity_duplication_scan: bool = False,
     write_event_files: bool = False,
+    process_imu: bool = False,
 ) -> PipelineResult:
     """Estimate multi-device timing and optionally write merged streams.
 
@@ -706,6 +719,7 @@ def run_multidevice_sync(
                 output_folder / "analogin.dat",
                 output_folder / "time.dat",
                 output_folder / "valid_samples.dat",
+                output_folder / "valid_analog_samples.dat",
                 output_folder / "wild_multilogger_session_inspection.png",
             ]
         )
@@ -1356,6 +1370,109 @@ def run_multidevice_sync(
             )
     temporary_owner.cleanup()
     classified_intervals = list(merge_compatible_intervals(classified_intervals))
+
+    # Analog storage has its own integrity domain.  The continuous neural
+    # clock fit supplies only cross-device rate/phase prior evidence; neural
+    # storage steps and validity intervals are never copied into analog.
+    performance.begin("analog_integrity_scan")
+    analog_authority_enabled = all(
+        recording.analog_channels == 16 for recording in recordings
+    )
+    analog_integrity_by_device: dict[int, AnalogIntegrityResult] = {}
+    analog_workers = max(1, min(int(options.max_parallel_workers), len(recordings)))
+    performance.set_workers(analog_integrity_workers=analog_workers)
+    try:
+        if analog_authority_enabled:
+            with ThreadPoolExecutor(max_workers=analog_workers) as pool:
+                futures = {
+                    pool.submit(
+                        scan_analog_integrity,
+                        recording.analog_file,
+                        channel_count=recording.analog_channels,
+                        device_index=device_index + 1,
+                    ): device_index
+                    for device_index, recording in enumerate(recordings)
+                }
+                for future in as_completed(futures):
+                    analog_integrity_by_device[futures[future]] = future.result()
+    except BaseException:
+        performance.end(
+            "analog_integrity_scan",
+            bytes_read=input_bytes["analogin.dat"],
+            status="failed",
+        )
+        raise
+    else:
+        performance.end(
+            "analog_integrity_scan",
+            bytes_read=input_bytes["analogin.dat"],
+        )
+    analog_integrity_results = (
+        [analog_integrity_by_device[index] for index in range(len(recordings))]
+        if analog_authority_enabled
+        else []
+    )
+    pair_by_device = {pair.slave_index - 1: pair for pair in pairs}
+    analog_clock_priors: list[DeviceClockPrior] = []
+    for device_index, recording in enumerate(recordings):
+        if device_index == master_index:
+            analog_clock_priors.append(
+                DeviceClockPrior(
+                    device_index=device_index + 1,
+                    source_ephys_scale=1.0,
+                    source_ephys_intercept_samples=0.0,
+                    canonical_ephys_start_sample=0.0,
+                    ephys_sample_rate_hz=float(master.fs),
+                    method="master_hardware_identity",
+                    support_ids=("master-clock-000-start", "master-clock-999-end"),
+                    confidence="high",
+                    evidence="master analog/ephys carrier identity prior",
+                )
+            )
+            continue
+        pair = pair_by_device[device_index]
+        accepted = [
+            observation
+            for observation in pair.observations
+            if observation.accepted and not observation.search_mode.startswith("coarse")
+        ]
+        support_ids = tuple(
+            f"pair-{pair.slave_index}-observation-{index:08d}"
+            for index in range(len(accepted))
+        )
+        confidence = (
+            "medium"
+            if pair.status != "FAIL" and len(support_ids) >= 2
+            else "unresolved"
+        )
+        analog_clock_priors.append(
+            DeviceClockPrior(
+                device_index=device_index + 1,
+                source_ephys_scale=pair.model.source_scale(master.fs),
+                source_ephys_intercept_samples=pair.model.intercept_samples,
+                canonical_ephys_start_sample=0.0,
+                ephys_sample_rate_hz=float(master.fs),
+                method="neural_clean_prior",
+                support_ids=(support_ids or (f"pair-{pair.slave_index}-unsupported",)),
+                residual_rms_rows=(
+                    max(0.0, pair.model.residual_rms_samples / (master.fs / 1250.0))
+                    if math.isfinite(pair.model.residual_rms_samples)
+                    else 0.0
+                ),
+                residual_max_abs_rows=max(
+                    0.0,
+                    (
+                        pair.model.residual_max_abs_samples / (master.fs / 1250.0)
+                        if math.isfinite(pair.model.residual_max_abs_samples)
+                        else 0.0
+                    ),
+                ),
+                confidence=confidence,
+                evidence=(
+                    "continuous pair affine fit only; neural storage steps and exclusions omitted"
+                ),
+            )
+        )
     result = PipelineResult(
         recordings=recordings,
         master_index=master_index + 1,
@@ -1395,7 +1512,9 @@ def run_multidevice_sync(
         {
             "sync_status": result.status,
             "merge_status": "NOT_RUN",
+            "analog_status": "NOT_RUN",
             "pc_time_status": "NOT_RUN",
+            "imu_status": "NOT_RUN",
             "overall_status": "FAIL" if result.status == "FAIL" else "MERGE_ONLY",
         }
     )
@@ -1405,6 +1524,7 @@ def run_multidevice_sync(
         merge_metadata: dict[str, object] | None = None,
         pc_time_metadata: dict[str, object] | None = None,
         merge_status: str = "NOT_RUN",
+        analog_status: str = "NOT_RUN",
         pc_time_status: str = "NOT_RUN",
         overall_status: str = "FAIL",
         warnings: list[dict[str, object]] | None = None,
@@ -1419,15 +1539,22 @@ def run_multidevice_sync(
             },
             "sync_status": result.outputs["sync_status"],
             "merge_status": merge_status,
+            "analog_status": analog_status,
             "pc_time_status": pc_time_status,
+            "imu_status": result.outputs.get("imu_status", "NOT_RUN"),
             "overall_status": overall_status,
             "master_index": master_index + 1,
             "device_order": input_provenance,
-            "options": {"sync": asdict(options), "pc_time": asdict(pc_time_options)},
+            "options": {
+                "sync": asdict(options),
+                "pc_time": asdict(pc_time_options),
+                "process_imu": process_imu,
+            },
             "write_event_files": write_event_files,
             "sync": _sync_metadata(result),
             "merge": merge_metadata,
             "pc_time": pc_time_metadata or {"status": "not_run"},
+            "imu": {"status": "not_run"},
             "expected_output_bytes": {},
             "performance": performance.payload(),
             "warnings": warnings if warnings is not None else _manifest_warnings(pairs),
@@ -1457,7 +1584,15 @@ def run_multidevice_sync(
     } | figure_names
     if native_pc_time:
         extra_managed_names.update({"pc_time.dat", "pc_time_fit_summary.png"})
-    component = {"merge_status": "NOT_RUN", "pc_time_status": "NOT_RUN", "overall_status": "FAIL"}
+    if process_imu:
+        extra_managed_names.add("IMU.mat")
+    component = {
+        "merge_status": "NOT_RUN",
+        "analog_status": "NOT_RUN",
+        "pc_time_status": "NOT_RUN",
+        "imu_status": "NOT_RUN",
+        "overall_status": "FAIL",
+    }
 
     def stage_callback(staging: Path, staged_outputs: dict[str, str]) -> None:
         for pair in pairs:
@@ -1688,38 +1823,114 @@ def run_multidevice_sync(
             pair.figure_file = str(output_folder / Path(pair.figure_file).name)
 
         component["merge_status"] = (
-            "WARN" if postmerge_exclusions or result.status == "WARN" else "OK"
+            "WARN"
+            if postmerge_exclusions
+            or result.status == "WARN"
+            or merge_info.get("analog_status") == "WARN"
+            else "OK"
         )
+        component["analog_status"] = str(merge_info.get("analog_status", "NOT_RUN"))
         component["pc_time_status"] = "NOT_RUN"
         component["overall_status"] = "MERGE_ONLY"
         inspection_pc_time: object | None = None
         pc_time_metadata: dict[str, object] = {"status": "not_run"}
         pc_time_warning_message = ""
+        imu_metadata: dict[str, object] = {"status": "not_run"}
+        imu_warning_message = ""
         if native_pc_time:
             performance.begin("pc_time_generation")
             master = recordings[master_index]
             staged_pc_time = staging / "pc_time.dat"
             try:
-                indices, packed, packed_diagnostics = collect_packed_updates(
-                    master.analog_file,
-                    CE64_RAW_MISC_LAYOUT,
-                    return_diagnostics=True,
-                )
-                anchor_ms, anchor_source = resolve_recording_start_ms(
-                    master.folder, explicit_recording_start_ms=recording_start_ms
-                )
-                pc_fit = fit_gap_aware_pc_time_model(
-                    indices,
-                    packed,
-                    master.fs,
-                    anchor_ms,
-                    device_gaps=(),
-                    master_device_index=master_index + 1,
-                )
-                pc_model = pc_fit.model
+                if analog_authority_enabled:
+                    master_prior = replace(
+                        analog_clock_priors[master_index],
+                        canonical_ephys_start_sample=float(
+                            merge_info["common_start_master_sample"]
+                        ),
+                    )
+                    master_integrity = analog_integrity_results[master_index]
+                    master_segments = build_event_driven_analog_segments(
+                        master_prior,
+                        canonical_start_row=0,
+                        canonical_end_row=int(merge_info["analog_samples"]),
+                        raw_row_count=master.analog_samples,
+                        decisions=tuple(
+                            event
+                            for event in master_integrity.timeline_events
+                            if event.kind != "counter_corruption"
+                        ),
+                    )
+                    master_timeline = next(
+                        timeline
+                        for timeline in merge_info["analog_timelines"]
+                        if int(timeline["device_index"]) == master_index + 1
+                    )
+                    if [segment.to_dict() for segment in master_segments] != master_timeline["segments"]:
+                        raise ValueError(
+                            "PC-time analog mapping differs from the mapping used to write analogin.dat"
+                        )
+                    packed_updates = collect_packed_update_rows(
+                        master.analog_file,
+                        CE64_RAW_MISC_LAYOUT,
+                        valid_raw_runs=master_integrity.valid_raw_support_runs(),
+                    )
+                    packed_diagnostics = packed_updates.diagnostics
+                    anchor_ms, anchor_source = resolve_recording_start_ms(
+                        master.folder, explicit_recording_start_ms=recording_start_ms
+                    )
+                    analog_pc_fit = fit_pc_time_through_analog_mapping(
+                        packed_updates,
+                        master_segments,
+                        canonical_analog_row_zero_neural_sample=float(
+                            merge_info["common_start_master_sample"]
+                        ),
+                        ephys_sample_rate_hz=float(master.fs),
+                        analog_sample_rate_hz=1250.0,
+                        recording_start_ms=anchor_ms,
+                        device_index=master_index + 1,
+                    )
+                    pc_model = analog_pc_fit.model
+                    canonicalized_count = int(
+                        analog_pc_fit.canonical_neural_indices.size
+                    )
+                    analog_pc_metadata: dict[str, object] = {
+                        "analog_timeline_mapping_hash": master_timeline["mapping_hash"],
+                        "analog_mapping_provenance_hash": analog_pc_fit.provenance_hash,
+                        "analog_mapping_diagnostics": analog_pc_fit.diagnostics.to_dict(),
+                        "maximum_mapping_quantization_error_seconds": (
+                            analog_pc_fit.diagnostics.max_quantization_error_seconds
+                        ),
+                    }
+                else:
+                    indices, packed, packed_diagnostics = collect_packed_updates(
+                        master.analog_file,
+                        CE64_RAW_MISC_LAYOUT,
+                        return_diagnostics=True,
+                    )
+                    anchor_ms, anchor_source = resolve_recording_start_ms(
+                        master.folder, explicit_recording_start_ms=recording_start_ms
+                    )
+                    legacy_pc_fit = fit_gap_aware_pc_time_model(
+                        indices,
+                        packed,
+                        master.fs,
+                        anchor_ms,
+                        device_gaps=(),
+                        master_device_index=master_index + 1,
+                    )
+                    pc_model = legacy_pc_fit.model
+                    canonicalized_count = int(
+                        legacy_pc_fit.canonical_update_indices.size
+                    )
+                    analog_pc_metadata = {
+                        "analog_mapping_policy": (
+                            "legacy fallback for non-WILD 16-channel analog layout"
+                        )
+                    }
                 inspection_pc_time = pc_model
                 pc_validation = validate_canonical_pc_time_interval(
-                    pc_fit,
+                    pc_model,
                     sample_rate_hz=master.fs,
                     canonical_start_sample=int(merge_info["common_start_master_sample"]),
                     n_samples=int(merge_info["n_samples"]),
@@ -1746,7 +1957,8 @@ def run_multidevice_sync(
                             packed_diagnostics.rejected_unstable_run_count
                         ),
                         "packed_update_decode": packed_diagnostics.to_dict(),
-                        "canonicalized_update_count": int(pc_fit.canonical_update_indices.size),
+                        "canonicalized_update_count": canonicalized_count,
+                        **analog_pc_metadata,
                         "neural_master_gap_count": sum(
                             gap.device_index == master_index + 1
                             for gap in result.device_gaps
@@ -1770,7 +1982,7 @@ def run_multidevice_sync(
                 if pc_validation.status == "OK":
                     write_canonical_interval_pc_time(
                         staging / "pc_time.dat",
-                        pc_fit,
+                        pc_model,
                         sample_rate_hz=master.fs,
                         canonical_start_sample=int(merge_info["common_start_master_sample"]),
                         n_samples=int(merge_info["n_samples"]),
@@ -1808,6 +2020,163 @@ def run_multidevice_sync(
                 "pc_time_generation",
                 bytes_written=(
                     staged_pc_time.stat().st_size if staged_pc_time.is_file() else 0
+                ),
+            )
+
+        if process_imu:
+            performance.begin("imu_generation")
+            try:
+                if not analog_authority_enabled:
+                    raise ValueError(
+                        "synchronized IMU requires the WILD 16-channel raw analog layout"
+                    )
+                segment_sets: dict[int, tuple] = {}
+                timeline_hashes: dict[str, str] = {}
+                for device_index, (recording, integrity, prior) in enumerate(
+                    zip(recordings, analog_integrity_results, analog_clock_priors), start=1
+                ):
+                    resolved_prior = replace(
+                        prior,
+                        canonical_ephys_start_sample=float(
+                            merge_info["common_start_master_sample"]
+                        ),
+                    )
+                    segments = build_event_driven_analog_segments(
+                        resolved_prior,
+                        canonical_start_row=0,
+                        canonical_end_row=int(merge_info["analog_samples"]),
+                        raw_row_count=recording.analog_samples,
+                        decisions=tuple(
+                            event
+                            for event in integrity.timeline_events
+                            if event.kind != "counter_corruption"
+                        ),
+                    )
+                    timeline = next(
+                        item
+                        for item in merge_info["analog_timelines"]
+                        if int(item["device_index"]) == device_index
+                    )
+                    if [segment.to_dict() for segment in segments] != timeline["segments"]:
+                        raise ValueError(
+                            "IMU analog mapping differs from the mapping used to write analogin.dat"
+                        )
+                    segment_sets[device_index] = segments
+                    timeline_hashes[str(device_index)] = str(timeline["mapping_hash"])
+                canonical_imu_invalid_intervals = {
+                    device_index: project_raw_imu_intervals_to_canonical(
+                        segment_sets[device_index],
+                        tuple(
+                            (event.raw_start_row, event.raw_end_row)
+                            for event in integrity.events
+                            if event.kind in IMU_MODALITY_INVALID_KINDS
+                        ),
+                        device_index=device_index,
+                    )
+                    for device_index, integrity in enumerate(
+                        analog_integrity_results, start=1
+                    )
+                }
+                imu_result = build_imu_from_merged(
+                    recordings,
+                    Path(staged_outputs["analog"]),
+                    Path(staged_outputs["analog_validity"]),
+                    segments_by_device=segment_sets,
+                    canonical_rows=int(merge_info["analog_samples"]),
+                    invalid_canonical_intervals_by_device=(
+                        canonical_imu_invalid_intervals
+                    ),
+                    mapping_hashes_by_device={
+                        int(device_index): mapping_hash
+                        for device_index, mapping_hash in timeline_hashes.items()
+                    },
+                    master_index=master_index + 1,
+                    master_start_sample=int(merge_info["common_start_master_sample"]),
+                    master_start_sec=(
+                        int(merge_info["common_start_master_sample"])
+                        / float(recordings[master_index].fs)
+                    ),
+                    perform_sensor_fusion=True,
+                )
+                write_synchronized_imu_mat(
+                    imu_result,
+                    staging / "IMU.mat",
+                )
+                component["imu_status"] = imu_result.status
+                imu_metadata = {
+                    "status": imu_result.status.lower(),
+                    "file": "IMU.mat",
+                    "sample_rate_hz": imu_result.sample_rate_hz,
+                    "raw_sample_rate_hz": imu_result.raw_sample_rate_hz,
+                    "sample_count": int(imu_result.time_seconds.size),
+                    "fusion_status": (
+                        "OK"
+                        if all(
+                            device.fusion is not None
+                            and device.fusion.status == "OK"
+                            for device in imu_result.devices
+                        )
+                        else "WARN"
+                    ),
+                    "fusion_method": str(imu_result.provenance["fusion"]),
+                    "source_domain": "canonical_merged_analog",
+                    "source_analog_file": "analogin.dat",
+                    "source_validity_file": "valid_analog_samples.dat",
+                    "analog_timeline_mapping_hashes": timeline_hashes,
+                    "devices": [
+                        {
+                            "device_index": device.device_index,
+                            "status": device.status,
+                            "valid_count": device.valid_count,
+                            "valid_fraction": device.valid_fraction,
+                            "mapping_hash": device.mapping_hash,
+                            "fusion_status": (
+                                device.fusion.status
+                                if device.fusion is not None
+                                else "NOT_RUN"
+                            ),
+                            "fusion_method": (
+                                device.fusion.method
+                                if device.fusion is not None
+                                else None
+                            ),
+                            "fusion_valid_count": (
+                                int(np.count_nonzero(device.fusion.valid))
+                                if device.fusion is not None
+                                else 0
+                            ),
+                            "fusion_valid_fraction": (
+                                float(np.mean(device.fusion.valid))
+                                if device.fusion is not None
+                                and device.fusion.valid.size
+                                else 0.0
+                            ),
+                        }
+                        for device in imu_result.devices
+                    ],
+                }
+                if imu_result.status == "WARN":
+                    affected = [
+                        str(device.device_index)
+                        for device in imu_result.devices
+                        if device.status == "WARN"
+                    ]
+                    imu_warning_message = (
+                        "one or more devices have incomplete synchronized IMU support "
+                        "or local modality-QC exclusions"
+                        + (f" (device(s) {', '.join(affected)})" if affected else "")
+                    )
+            except Exception as error:
+                (staging / "IMU.mat").unlink(missing_ok=True)
+                component["imu_status"] = "FAIL"
+                performance.end("imu_generation", status="failed", bytes_written=0)
+                raise
+            performance.end(
+                "imu_generation",
+                bytes_written=(
+                    (staging / "IMU.mat").stat().st_size
+                    if (staging / "IMU.mat").is_file()
+                    else 0
                 ),
             )
 
@@ -1916,6 +2285,14 @@ def run_multidevice_sync(
             "analogin.dat": int(merge_info["analog_samples"]) * int(merge_info["analog_channels"]) * 2,
             "time.dat": int(merge_info["n_samples"]) * 4,
             "valid_samples.dat": int(merge_info["n_samples"]) * len(recordings),
+            **(
+                {
+                    "valid_analog_samples.dat": int(merge_info["analog_samples"])
+                    * len(recordings)
+                }
+                if merge_info.get("analog_validity_samples_file")
+                else {}
+            ),
         }
         if component["pc_time_status"] == "OK":
             expected_output_bytes["pc_time.dat"] = int(merge_info["n_samples"]) * 4
@@ -1945,6 +2322,14 @@ def run_multidevice_sync(
                     "component": "pc_time",
                     "status": "WARN",
                     "message": pc_time_warning_message,
+                }
+            )
+        if component["imu_status"] == "WARN":
+            warnings.append(
+                {
+                    "component": "imu",
+                    "status": "WARN",
+                    "message": imu_warning_message,
                 }
             )
         if result.device_gaps:
@@ -1985,15 +2370,22 @@ def run_multidevice_sync(
                 },
                 "sync_status": result.outputs["sync_status"],
                 "merge_status": component["merge_status"],
+                "analog_status": component["analog_status"],
                 "pc_time_status": component["pc_time_status"],
+                "imu_status": component["imu_status"],
                 "overall_status": component["overall_status"],
                 "master_index": master_index + 1,
                 "device_order": input_provenance,
-                "options": {"sync": asdict(options), "pc_time": asdict(pc_time_options)},
+                "options": {
+                    "sync": asdict(options),
+                    "pc_time": asdict(pc_time_options),
+                    "process_imu": process_imu,
+                },
                 "write_event_files": write_event_files,
                 "sync": _sync_metadata(result),
                 "merge": merge_info,
                 "pc_time": pc_time_metadata,
+                "imu": imu_metadata,
                 "expected_output_bytes": expected_output_bytes,
                 "performance": performance.payload(),
                 "warnings": warnings,
@@ -2034,6 +2426,10 @@ def run_multidevice_sync(
                 device_source_steps=result.device_source_steps,
                 device_terminal_support=result.device_terminal_support,
                 device_sync_segments=result.device_sync_segments,
+                analog_integrity_results=(
+                    analog_integrity_results if analog_authority_enabled else None
+                ),
+                analog_clock_priors=(analog_clock_priors if analog_authority_enabled else None),
                 preserve_device_tails=True,
                 write_event_files=write_event_files,
                 chunk_seconds=options.chunk_seconds,
@@ -2050,6 +2446,8 @@ def run_multidevice_sync(
                 "run_manifest": str(output_folder / "wild_preprocess_run.json"),
             }
         )
+        if process_imu and (output_folder / "IMU.mat").is_file():
+            result.outputs["imu"] = str(output_folder / "IMU.mat")
         result.outputs.update(component)
         published = True
         return result
@@ -2059,6 +2457,7 @@ def run_multidevice_sync(
             {
                 "sync_status": "OK",
                 "merge_status": "FAIL",
+                "analog_status": "NOT_RUN",
                 "pc_time_status": "NOT_RUN",
                 "overall_status": "FAIL",
                 "attempt_folder": str(attempt_folder),
