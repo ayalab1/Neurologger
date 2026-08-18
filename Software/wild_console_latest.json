@@ -1,6 +1,6 @@
 {
-    "version":  "3.4.2.136",
-    "url":  "https://github.com/ayalab1/Neurologger/raw/main/Software/wild_console_Setup_3.4.2.136.exe",
-    "sha256":  "6A4C9DB36983CE2792A8FE54488F13C00D9D4C093A9CCDDCE8443E5F07D110F5",
-    "notes":  "Restores cloud publishing of WB55 advertisement timestamps and recorder telemetry after BLE route consolidation."
+    "version":  "3.4.2.137",
+    "url":  "https://github.com/ayalab1/Neurologger/raw/main/Software/wild_console_Setup_3.4.2.137.exe",
+    "sha256":  "1E9AD9129FBF534E2259B14509AB923C9B72D27A8DE7956CB1040AD95D955709",
+    "notes":  "Keeps cloud presence current by preferring fresh BLE reporter observations and preserving the newest timestamp across routes."
 }
