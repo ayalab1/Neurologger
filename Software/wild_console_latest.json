@@ -1,6 +1,6 @@
 {
-    "version":  "3.4.2.135",
-    "url":  "https://github.com/ayalab1/Neurologger/raw/main/Software/wild_console_Setup_3.4.2.135.exe",
-    "sha256":  "C24B6441F77A12C5C4B8F51E97D898B8CDA36F4D33573FEED3D51DE48EE70E08",
-    "notes":  "Collapses duplicate BLE reporters into one automatically routed physical-device entry."
+    "version":  "3.4.2.136",
+    "url":  "https://github.com/ayalab1/Neurologger/raw/main/Software/wild_console_Setup_3.4.2.136.exe",
+    "sha256":  "6A4C9DB36983CE2792A8FE54488F13C00D9D4C093A9CCDDCE8443E5F07D110F5",
+    "notes":  "Restores cloud publishing of WB55 advertisement timestamps and recorder telemetry after BLE route consolidation."
 }
