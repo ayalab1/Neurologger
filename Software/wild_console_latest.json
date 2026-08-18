@@ -1,6 +1,6 @@
 {
-    "version":  "3.4.2.133",
-    "url":  "https://github.com/ayalab1/Neurologger/raw/main/Software/wild_console_Setup_3.4.2.133.exe",
-    "sha256":  "DD3B00CB41EB6240CC0036F8BEF0F001DF1D1D0AD7EFBE51D941EC61F76F6DCC",
-    "notes":  "Improved WILD Console control flow and cloud publishing efficiency."
+    "version":  "3.4.2.134",
+    "url":  "https://github.com/ayalab1/Neurologger/raw/main/Software/wild_console_Setup_3.4.2.134.exe",
+    "sha256":  "895059FFBA79A6105B849400A696130C59C057EBF551F75F4E11FF52582105F9",
+    "notes":  "Improved multi-dongle BLE routing, connection recovery, and impedance reporting."
 }
