@@ -1,6 +1,6 @@
 {
-    "version":  "3.4.2.137",
-    "url":  "https://github.com/ayalab1/Neurologger/raw/main/Software/wild_console_Setup_3.4.2.137.exe",
-    "sha256":  "1E9AD9129FBF534E2259B14509AB923C9B72D27A8DE7956CB1040AD95D955709",
-    "notes":  "Keeps cloud presence current by preferring fresh BLE reporter observations and preserving the newest timestamp across routes."
+  "version": "3.4.2.138",
+  "url": "https://github.com/ayalab1/Neurologger/raw/main/Software/wild_console_Setup_3.4.2.138.exe",
+  "sha256": "697DA31F327052B5939F6C6461ECA5754F19CB22ADBFA4E451686629FD319EED",
+  "notes": "Publishes every current CE/WILD advertisement from all WB55/nRF dongles and Windows Bluetooth, deduplicated by BLE address, while rejecting unrelated FFF0 devices by name."
 }
