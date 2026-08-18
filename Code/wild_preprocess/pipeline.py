@@ -670,6 +670,7 @@ def run_multidevice_sync(
     progress: ProgressCallback | None = None,
     native_pc_time: bool = False,
     recording_start_ms: int | None = None,
+    allow_folder_name_start_fallback: bool = False,
     validate_postmerge: bool | None = None,
     pc_time_options: PcTimeOptions | None = None,
     probe_indices: list[int] | None = None,
@@ -695,6 +696,8 @@ def run_multidevice_sync(
         # production worker always enables native PC time and therefore the
         # publication gate; direct legacy callers can opt in explicitly.
         validate_postmerge = native_pc_time
+    if progress is not None:
+        progress("inspect_inputs", 0.0)
     with performance.measure("input_inspection"):
         recordings = recordings_from_folders(device_folders)
         probes = _validate_selected_inputs(
@@ -703,6 +706,8 @@ def run_multidevice_sync(
             recording_start_anchors=recording_start_anchors,
         )
         input_provenance = _input_provenance(recordings, probes, recording_start_anchors)
+    if progress is not None:
+        progress("inspect_inputs", 100.0)
     if master_index < 0 or master_index >= len(recordings):
         raise ValueError(f"master_index {master_index} is outside {len(recordings)} recordings")
     output_folder = Path(output_folder).resolve()
@@ -777,6 +782,8 @@ def run_multidevice_sync(
         evidence_scans: dict[int, object] = {}
         feature_percent = [0.0] * len(recordings)
         feature_lock = Lock()
+        if progress is not None:
+            progress("build_features", 0.0)
 
         def build_feature(index: int) -> Path:
             def feature_progress(stage: str, percent: float) -> None:
@@ -833,18 +840,37 @@ def run_multidevice_sync(
                     for path in [*feature_paths, *coarse_feature_paths, *frame_hash_paths]
                 ),
             )
+        if progress is not None:
+            progress("build_features", 100.0)
 
         slave_indices = [index for index in range(len(recordings)) if index != master_index]
         master = recordings[master_index]
 
+        pair_percent = {index: 0.0 for index in slave_indices}
+        pair_progress_lock = Lock()
+        if progress is not None:
+            progress("sync_pairs", 0.0)
+
         def observe_slave(slave_index: int):
+            def observation_progress(_stage: str, percent: float) -> None:
+                if progress is None:
+                    return
+                with pair_progress_lock:
+                    pair_percent[slave_index] = max(
+                        pair_percent[slave_index], max(0.0, min(100.0, percent))
+                    )
+                    progress(
+                        "sync_pairs",
+                        sum(pair_percent.values()) / len(pair_percent),
+                    )
+
             return observe_pair(
                 master,
                 recordings[slave_index],
                 feature_paths[master_index],
                 feature_paths[slave_index],
                 options,
-                progress=None,
+                progress=observation_progress,
                 master_coarse_feature_path=coarse_feature_paths[master_index],
                 slave_coarse_feature_path=coarse_feature_paths[slave_index],
                 coarse_downsample_factor=evidence_scans[master_index].coarse_downsample_factor,
@@ -859,7 +885,12 @@ def run_multidevice_sync(
                 for completed, slave_index in enumerate(slave_indices, start=1):
                     observed_by_slave[slave_index] = observe_slave(slave_index)
                     if progress is not None:
-                        progress("sync_pairs", 100.0 * completed / len(slave_indices))
+                        with pair_progress_lock:
+                            pair_percent[slave_index] = 100.0
+                            progress(
+                                "sync_pairs",
+                                sum(pair_percent.values()) / len(pair_percent),
+                            )
             else:
                 with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="wild-sync-pair") as executor:
                     futures = {executor.submit(observe_slave, slave_index): slave_index for slave_index in slave_indices}
@@ -867,10 +898,20 @@ def run_multidevice_sync(
                         slave_index = futures[future]
                         observed_by_slave[slave_index] = future.result()
                         if progress is not None:
-                            progress("sync_pairs", 100.0 * completed / len(slave_indices))
+                            with pair_progress_lock:
+                                pair_percent[slave_index] = 100.0
+                                progress(
+                                    "sync_pairs",
+                                    sum(pair_percent.values()) / len(pair_percent),
+                                )
+
+        if progress is not None:
+            progress("sync_pairs", 100.0)
 
         performance.begin("full_rate_refinement")
-        for slave_index in slave_indices:
+        if progress is not None:
+            progress("refine_sync", 0.0)
+        for refined_count, slave_index in enumerate(slave_indices, start=1):
             slave = recordings[slave_index]
             observed = observed_by_slave[slave_index]
             model = fit_affine_sync_model(observed.observations, master.fs, options=options)
@@ -1088,6 +1129,11 @@ def run_multidevice_sync(
             with performance.measure("pair_figure_generation"):
                 save_pair_figure(pair, observed, figure_path)
             pairs.append(pair)
+            if progress is not None:
+                progress(
+                    "refine_sync",
+                    100.0 * refined_count / len(slave_indices),
+                )
 
         performance.end("full_rate_refinement")
         with performance.measure("attribution_segment_construction"):
@@ -1304,6 +1350,8 @@ def run_multidevice_sync(
     performance.end("attribution_segment_construction")
     duplication_scans: dict[int, dict[str, object]] = {}
     performance.set_workers(duplication_workers=0)
+    if progress is not None:
+        progress("integrity_scan", 0.0)
     if integrity_duplication_scan:
         audit_options = RawAuditOptions(max_parallel_workers=1)
         duplication_workers = max(1, min(int(options.max_parallel_workers), len(recordings)))
@@ -1368,6 +1416,8 @@ def run_multidevice_sync(
                     canonicalize_current_sample=to_canonical,
                 )
             )
+    if progress is not None:
+        progress("integrity_scan", 100.0)
     temporary_owner.cleanup()
     classified_intervals = list(merge_compatible_intervals(classified_intervals))
 
@@ -1656,6 +1706,8 @@ def run_multidevice_sync(
         postmerge_warning_messages: list[str] = []
         postmerge_exclusion_rounds = 0
         performance.begin("postmerge_validation")
+        if progress is not None:
+            progress("postmerge_qc", 0.0)
         if validate_postmerge:
             def validate_current_stage(
                 *, structural_only: bool = False
@@ -1764,6 +1816,8 @@ def run_multidevice_sync(
                             ),
                         )
         performance.end("postmerge_validation")
+        if progress is not None:
+            progress("postmerge_qc", 100.0)
         if postmerge is None:
             serialized_postmerge = {
                 "status": "NOT_RUN",
@@ -1839,6 +1893,8 @@ def run_multidevice_sync(
         imu_warning_message = ""
         if native_pc_time:
             performance.begin("pc_time_generation")
+            if progress is not None:
+                progress("pc_time", 0.0)
             master = recordings[master_index]
             staged_pc_time = staging / "pc_time.dat"
             try:
@@ -1877,7 +1933,9 @@ def run_multidevice_sync(
                     )
                     packed_diagnostics = packed_updates.diagnostics
                     anchor_ms, anchor_source = resolve_recording_start_ms(
-                        master.folder, explicit_recording_start_ms=recording_start_ms
+                        master.folder,
+                        explicit_recording_start_ms=recording_start_ms,
+                        allow_folder_name_fallback=allow_folder_name_start_fallback,
                     )
                     analog_pc_fit = fit_pc_time_through_analog_mapping(
                         packed_updates,
@@ -1909,7 +1967,9 @@ def run_multidevice_sync(
                         return_diagnostics=True,
                     )
                     anchor_ms, anchor_source = resolve_recording_start_ms(
-                        master.folder, explicit_recording_start_ms=recording_start_ms
+                        master.folder,
+                        explicit_recording_start_ms=recording_start_ms,
+                        allow_folder_name_fallback=allow_folder_name_start_fallback,
                     )
                     legacy_pc_fit = fit_gap_aware_pc_time_model(
                         indices,
@@ -1950,7 +2010,8 @@ def run_multidevice_sync(
                     {
                         "merge_run_id": run_id,
                         "status": pc_validation.status.lower(),
-                        "aligned_to_merge": pc_validation.status == "OK",
+                        "published": False,
+                        "aligned_to_merge": False,
                         "raw_update_count": packed_diagnostics.raw_candidate_run_count,
                         "accepted_update_count": packed_diagnostics.accepted_update_count,
                         "rejected_unstable_update_count": (
@@ -1979,19 +2040,26 @@ def run_multidevice_sync(
                     n_samples=int(merge_info["n_samples"]),
                     sample_rate_hz=master.fs,
                 )
-                if pc_validation.status == "OK":
+                component["pc_time_status"] = pc_validation.status
+                if pc_validation.publishable:
                     write_canonical_interval_pc_time(
-                        staging / "pc_time.dat",
+                        staged_pc_time,
                         pc_model,
                         sample_rate_hz=master.fs,
                         canonical_start_sample=int(merge_info["common_start_master_sample"]),
                         n_samples=int(merge_info["n_samples"]),
+                        progress=(
+                            (lambda percent: progress("pc_time", percent))
+                            if progress is not None
+                            else None
+                        ),
                     )
-                    component["pc_time_status"] = "OK"
+                    payload["published"] = True
+                    payload["aligned_to_merge"] = True
                     component["overall_status"] = "COMPLETE"
                 else:
-                    staged_pc_time.unlink(missing_ok=True)
-                    component["pc_time_status"] = "WARN"
+                    pc_time_warning_message = "; ".join(pc_validation.publication_blockers)
+                if pc_validation.status == "WARN" and not pc_time_warning_message:
                     pc_time_warning_message = pc_validation.message
             except Exception as error:
                 staged_pc_time.unlink(missing_ok=True)
@@ -2002,6 +2070,7 @@ def run_multidevice_sync(
                     "run_id": run_id,
                     "merge_run_id": run_id,
                     "status": "warning",
+                    "published": False,
                     "aligned_to_merge": False,
                     "common_start_master_sample": int(merge_info["common_start_master_sample"]),
                     "n_samples": int(merge_info["n_samples"]),
@@ -2022,9 +2091,13 @@ def run_multidevice_sync(
                     staged_pc_time.stat().st_size if staged_pc_time.is_file() else 0
                 ),
             )
+            if progress is not None:
+                progress("pc_time", 100.0)
 
         if process_imu:
             performance.begin("imu_generation")
+            if progress is not None:
+                progress("imu", 0.0)
             try:
                 if not analog_authority_enabled:
                     raise ValueError(
@@ -2097,6 +2170,11 @@ def run_multidevice_sync(
                         / float(recordings[master_index].fs)
                     ),
                     perform_sensor_fusion=True,
+                    progress=(
+                        (lambda percent: progress("imu", percent))
+                        if progress is not None
+                        else None
+                    ),
                 )
                 write_synchronized_imu_mat(
                     imu_result,
@@ -2179,6 +2257,8 @@ def run_multidevice_sync(
                     else 0
                 ),
             )
+            if progress is not None:
+                progress("imu", 100.0)
 
         result.outputs.update(component)
         validity_order = [master_index, *(index for index in range(len(recordings)) if index != master_index)]
@@ -2196,6 +2276,8 @@ def run_multidevice_sync(
         }
         inspection_path = staging / "wild_multilogger_session_inspection.png"
         performance.begin("inspection_figure_generation")
+        if progress is not None:
+            progress("inspection", 0.0)
         try:
             write_session_inspection_png(
                 inspection_path,
@@ -2246,7 +2328,16 @@ def run_multidevice_sync(
                 pc_time=inspection_pc_time,
                 pc_time_summary=pc_time_metadata,
                 status=(
-                    "WARN" if component["merge_status"] == "WARN" else component["overall_status"]
+                    "WARN"
+                    if "WARN"
+                    in {
+                        result.outputs["sync_status"],
+                        component["merge_status"],
+                        component["analog_status"],
+                        component["pc_time_status"],
+                        component["imu_status"],
+                    }
+                    else component["overall_status"]
                 ),
                 residual_tolerance_samples=options.max_model_residual_samples,
                 master_gaps=[
@@ -2269,6 +2360,8 @@ def run_multidevice_sync(
                 "inspection_figure_generation",
                 bytes_written=inspection_path.stat().st_size,
             )
+        if progress is not None:
+            progress("inspection", 100.0)
         result.outputs["inspection_figure"] = str(
             output_folder / "wild_multilogger_session_inspection.png"
         )
@@ -2294,7 +2387,7 @@ def run_multidevice_sync(
                 else {}
             ),
         }
-        if component["pc_time_status"] == "OK":
+        if (staging / "pc_time.dat").is_file():
             expected_output_bytes["pc_time.dat"] = int(merge_info["n_samples"]) * 4
         actual_output_bytes = {
             path.name: path.stat().st_size
@@ -2322,6 +2415,7 @@ def run_multidevice_sync(
                     "component": "pc_time",
                     "status": "WARN",
                     "message": pc_time_warning_message,
+                    "published": bool(pc_time_metadata.get("published", False)),
                 }
             )
         if component["imu_status"] == "WARN":
@@ -2450,6 +2544,8 @@ def run_multidevice_sync(
             result.outputs["imu"] = str(output_folder / "IMU.mat")
         result.outputs.update(component)
         published = True
+        if progress is not None:
+            progress("publish", 100.0)
         return result
     except _StagedMergeRejected as error:
         result.status = "FAIL"

@@ -8,7 +8,7 @@ milliseconds since midnight, one value per amplifier-sample time point.
 Typical current CE64 use:
     python generate_pc_time.py C:\\Data\\WILD\\0_20260516_011122.208
 
-If the recording folder name does not end in HHMMSS.mmm, pass the start anchor:
+If CE_params.bin lacks valid RTC metadata, pass the start anchor explicitly:
     python generate_pc_time.py analogin.dat --sample-rate 20000 --recording-start 01:11:22.208
 
 To inspect the fit, add --summary-plot to also write pc_time_fit_summary.jpg:
@@ -23,6 +23,7 @@ import re
 import struct
 import sys
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -40,8 +41,8 @@ PACKED_PC_MS_MASK = (1 << 20) - 1
 PACKED_PC_DELAY_SHIFT = 20
 PACKED_PC_DELAY_MASK = (1 << 12) - 1
 PACKED_PC_MOD_MS = 1 << 20
-CE_PARAMS_DATE_OFFSET = 336
-CE_PARAMS_TIME_OFFSET = 356
+CE_PARAMS_DATE_OFFSET = 332
+CE_PARAMS_TIME_OFFSET = 336
 CE_PARAMS_DATE_SIZE = 4
 CE_PARAMS_TIME_SIZE = 20
 ROBUST_MODEL_MAX_SEED_POINTS = 48
@@ -221,7 +222,9 @@ def decode_ce_params_recording_start_ms(data: bytes) -> int | None:
         CE_PARAMS_TIME_OFFSET + 4,
     )
 
-    if not (0 <= year <= 99 and 1 <= month <= 12 and 1 <= day <= 31):
+    try:
+        date(2000 + year, month, day)
+    except ValueError:
         return None
     if hours > 23 or minutes > 59 or seconds > 59:
         return None
@@ -1192,7 +1195,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--recording-start",
         type=parse_ms_of_day,
-        help="recording start time as ms since midnight, HH:MM:SS.mmm, or HHMMSS.mmm; defaults to CE_params.bin, then folder suffix",
+        help="recording start time as ms since midnight, HH:MM:SS.mmm, or HHMMSS.mmm; defaults to CE_params.bin",
+    )
+    parser.add_argument(
+        "--allow-folder-name-start-fallback",
+        action="store_true",
+        help="explicitly allow a trailing HHMMSS.mmm recording-folder timestamp when CE RTC metadata is unavailable",
     )
     parser.add_argument(
         "--summary-plot",
@@ -1220,19 +1228,20 @@ def main() -> int:
     elif hints.recording_start_ms is not None:
         recording_start_ms = hints.recording_start_ms
         recording_start_source = "CE_params.bin"
-    else:
+    elif args.allow_folder_name_start_fallback:
         inferred_start = infer_recording_start_from_name(record_dir)
         if inferred_start is None:
-            inferred_start = 0
-            recording_start_source = "00:00 fallback"
-            warn(
-                "recording start time not found in CE_params.bin or folder name; "
-                "anchoring 2^20-ms PC-time cycle to 00:00:00.000. "
-                "Pass --recording-start for an explicit reference."
+            raise ValueError(
+                "recording start time not found in CE_params.bin or the recording folder name; "
+                "pass --recording-start for an explicit reference"
             )
-        else:
-            recording_start_source = "folder name"
+        recording_start_source = "folder name (explicit fallback)"
         recording_start_ms = inferred_start
+    else:
+        raise ValueError(
+            "recording start time not found in CE_params.bin; pass --recording-start, or explicitly "
+            "enable --allow-folder-name-start-fallback for legacy recovery"
+        )
 
     try:
         summary_plot_path = resolve_summary_plot_path(record_dir, args.summary_plot)

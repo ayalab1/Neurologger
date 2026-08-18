@@ -59,7 +59,7 @@ Install the numerical backend dependencies into the same Python environment used
 python -m pip install -r Code\wild_preprocess\requirements.txt
 ```
 
-The backend synchronizes the neural streams, independently reacquires each device after discontinuities, and verifies the merged result. Unknown or failed local intervals are zero-filled and marked `0` in `valid_samples.dat`; samples marked `1` always have a verified source mapping. PC time is generated from the master logger's packed clock only when its full-interval QC succeeds.
+The backend synchronizes the neural streams, independently reacquires each device after discontinuities, and verifies the merged result. Unknown or failed local intervals are zero-filled and marked `0` in `valid_samples.dat`; samples marked `1` always have a verified source mapping. PC time is fitted from stable packed-clock updates on the master logger's verified analog timeline. A supported, monotone canonical fit is published even when non-blocking quality checks such as an internal anchor gap or a single rate-change candidate report `WARN`; the warning and its diagnostics remain in the manifest and fit figure. Publication is still withheld for fewer than two time-separated anchors, a non-finite/non-increasing model, a persistent clock step, or a rate change reproduced at multiple tested boundaries.
 
 Outputs are staged before publication, so a failed run does not replace an existing canonical dataset.
 
@@ -67,8 +67,8 @@ The final manifest reports independent component states:
 
 | Overall status | Meaning |
 | --- | --- |
-| `COMPLETE` | Neural data and validated `pc_time.dat` were published. |
-| `MERGE_ONLY` | Neural data were published, but PC time was unavailable or failed QC. |
+| `COMPLETE` | Neural data and canonical `pc_time.dat` were published. Component quality may still be `WARN`; consult the manifest. |
+| `MERGE_ONLY` | Neural data were published, but no defensible PC-time model was constructed or its canonical file could not be written. |
 | `FAIL` | A structural mapping, DAT, write, or transaction error prevented publication. |
 
 Generated outputs include:
@@ -78,7 +78,7 @@ amplifier.dat
 analogin.dat
 time.dat
 valid_samples.dat
-pc_time.dat                       # COMPLETE only
+pc_time.dat                       # COMPLETE; may carry PC-time QC WARN
 pc_time_fit_summary.png
 wild_multilogger_sync_master_vs_*_qc.png
 wild_multilogger_session_inspection.png
@@ -86,6 +86,19 @@ wild_preprocess_run.json
 device_event.devXX.dYY.evt        # optional explicit export
 ```
 
-`wild_preprocess_run.json` is the single metadata file for the Python run. Use the pair QC figures, session inspection figure, and `pc_time_fit_summary.png` for review. Always apply the relevant columns of `valid_samples.dat` during analysis.
+`wild_preprocess_run.json` is the single metadata file for the Python run. `pc_time.published` records file availability independently of `pc_time_status`; a published `WARN` fit is usable as a fitted coordinate but may have locally elevated uncertainty. Use the pair QC figures, session inspection figure, and `pc_time_fit_summary.png` for review. Always apply the relevant columns of `valid_samples.dat` during analysis: a timestamp over a zero-filled interval locates canonical time but does not make the neural signal valid.
 
-Set `WILD_SYNC_BACKEND=matlab` before launching the GUI only when the legacy MATLAB backend is required. Multi-device IMU processing is not part of the Python backend.
+The Python workflow obtains each recording's absolute start anchor from the RTC
+metadata in `CE_params.bin`. Ready Check reports a failure before processing if
+that structured date/time is missing or invalid. A timestamp-like recording
+folder name is not authoritative and is not used by default because exported
+folders may be renamed or contain malformed suffixes. Programmatic worker and
+standalone-generator callers may explicitly enable the folder-name fallback
+only for legacy recovery; the recorded provenance identifies that fallback.
+No path silently substitutes midnight.
+
+Set `WILD_SYNC_BACKEND=matlab` before launching the GUI only when the legacy MATLAB backend is required. The standard Python GUI backend generates synchronized multi-device IMU output; the legacy MATLAB fallback does not gain that processing path.
+
+For a published Python manifest, regenerate PC time by rerunning the full preprocessing pipeline. The GUI does not allow the legacy standalone PC-time generator to replace a native result because that path does not share the canonical analog mapping or publication blockers.
+
+The GUI standard run always generates synchronized `IMU.mat`; this is no longer an operator option. LFP generation is not part of this preprocessing workflow and is not shown in the GUI. During a run, the progress bar reports the current numbered pipeline step and the percentage completed within that step. The percentage resets when processing advances to the next step instead of presenting a synthetic whole-run estimate.

@@ -38,6 +38,11 @@ class PcTimeValidation:
     drift_ppm: float
     persistent_step_detected: bool
     persistent_rate_change_detected: bool
+    maximum_local_rate_difference_ppm: float = 0.0
+    rate_change_trigger_count: int = 0
+    first_rate_change_trigger_time_sec: float | None = None
+    publishable: bool = True
+    publication_blockers: tuple[str, ...] = ()
 
 
 def _persistent_step(residual_ms: np.ndarray, threshold_ms: float, run: int) -> bool:
@@ -70,16 +75,19 @@ def _robust_residual_rate_ppm(device_ms: np.ndarray, residual_ms: np.ndarray) ->
     return float(np.median(delta_residual[usable] / delta_device[usable]) * 1_000_000.0)
 
 
-def _persistent_rate_change(
+def _rate_change_diagnostics(
     device_ms: np.ndarray,
     residual_ms: np.ndarray,
     threshold_ppm: float,
     run: int,
-) -> bool:
-    """Detect two adjacent, sufficiently supported residual-rate regimes."""
+) -> tuple[bool, float, int, float | None]:
+    """Summarize adjacent, sufficiently supported residual-rate regimes."""
 
     if device_ms.size < 2 * run:
-        return False
+        return False, 0.0, 0, None
+    maximum_difference = 0.0
+    trigger_count = 0
+    first_trigger_time_sec: float | None = None
     for boundary in range(run, device_ms.size - run + 1):
         before_rate = _robust_residual_rate_ppm(
             device_ms[boundary - run : boundary], residual_ms[boundary - run : boundary]
@@ -87,9 +95,24 @@ def _persistent_rate_change(
         after_rate = _robust_residual_rate_ppm(
             device_ms[boundary : boundary + run], residual_ms[boundary : boundary + run]
         )
-        if abs(after_rate - before_rate) >= threshold_ppm:
-            return True
-    return False
+        difference = abs(after_rate - before_rate)
+        maximum_difference = max(maximum_difference, difference)
+        if difference >= threshold_ppm:
+            trigger_count += 1
+            if first_trigger_time_sec is None:
+                first_trigger_time_sec = float(device_ms[boundary] / 1000.0)
+    return trigger_count > 0, maximum_difference, trigger_count, first_trigger_time_sec
+
+
+def _persistent_rate_change(
+    device_ms: np.ndarray,
+    residual_ms: np.ndarray,
+    threshold_ppm: float,
+    run: int,
+) -> bool:
+    """Return whether the ordered observations contain a rate-change trigger."""
+
+    return _rate_change_diagnostics(device_ms, residual_ms, threshold_ppm, run)[0]
 
 
 def _ordered_interval_observations(
@@ -143,11 +166,13 @@ def validate_pc_time_interval(
     coverage = 1.0 if duration_sec == 0 and count else (span / duration_sec if duration_sec else 0.0)
     ordered_times, ordered_residuals = _ordered_interval_observations(model, start_ms, end_ms)
     step = _persistent_step(ordered_residuals, options.persistent_step_ms, options.persistent_step_observations)
-    rate_change = _persistent_rate_change(
-        ordered_times,
-        ordered_residuals,
-        options.persistent_rate_change_ppm,
-        options.persistent_rate_observations,
+    rate_change, maximum_rate_difference, rate_trigger_count, first_rate_trigger = (
+        _rate_change_diagnostics(
+            ordered_times,
+            ordered_residuals,
+            options.persistent_rate_change_ppm,
+            options.persistent_rate_observations,
+        )
     )
     checks = [
         (count >= options.min_retained_anchors, f"retained anchors {count} < {options.min_retained_anchors}"),
@@ -161,6 +186,21 @@ def validate_pc_time_interval(
         (not rate_change, "persistent PC-clock rate-regime change detected"),
     ]
     failures = [message for passed, message in checks if not passed]
+    publication_blockers: list[str] = []
+    if count < 2 or not np.isfinite(span) or span <= 0.0:
+        publication_blockers.append("fewer than two time-separated retained anchors")
+    if (
+        not np.isfinite(model.slope)
+        or not np.isfinite(model.intercept_ms)
+        or model.slope <= 0.0
+    ):
+        publication_blockers.append("PC-clock affine model is non-finite or non-increasing")
+    if step:
+        publication_blockers.append("persistent PC-clock residual step detected")
+    if rate_trigger_count > 1:
+        publication_blockers.append(
+            f"PC-clock rate-regime change reproduced at {rate_trigger_count} tested boundaries"
+        )
     return PcTimeValidation(
         status="OK" if not failures else "WARN",
         message="; ".join(failures),
@@ -174,4 +214,9 @@ def validate_pc_time_interval(
         drift_ppm=model.drift_ppm,
         persistent_step_detected=step,
         persistent_rate_change_detected=rate_change,
+        maximum_local_rate_difference_ppm=maximum_rate_difference,
+        rate_change_trigger_count=rate_trigger_count,
+        first_rate_change_trigger_time_sec=first_rate_trigger,
+        publishable=not publication_blockers,
+        publication_blockers=tuple(publication_blockers),
     )

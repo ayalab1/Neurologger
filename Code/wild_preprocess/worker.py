@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import json
-import re
 import sys
 import traceback
-from datetime import date
 from pathlib import Path
 
 if __package__ in {None, ""}:
@@ -12,40 +10,29 @@ if __package__ in {None, ""}:
 
 from wild_preprocess.models import SyncOptions
 from wild_preprocess.pipeline import run_multidevice_sync
-from wild_preprocess.pc_time import PcTimeOptions, resolve_recording_start_ms
+from wild_preprocess.pc_time import PcTimeOptions, read_ce_params_hint, resolve_recording_start_ms
 
 
-_LAST_PROGRESS = -1.0
+_LAST_PROGRESS_STAGE: str | None = None
+_LAST_PROGRESS_PERCENT = -1.0
 WORKER_JOB_SCHEMA_VERSION = 3
 
 
-def _recording_date_from_folder(folder: Path) -> tuple[str | None, str | None]:
-    match = re.search(r"(?:^|_)(\d{8})(?:_|$)", folder.name)
-    if match is None:
-        return None, None
-    text = match.group(1)
-    try:
-        parsed = date(int(text[:4]), int(text[4:6]), int(text[6:8]))
-    except ValueError:
-        return None, None
-    return parsed.isoformat(), "recording folder name"
-
-
 def _progress(stage: str, percent: float) -> None:
-    global _LAST_PROGRESS
-    ranges = {
-        "build_features": (0.0, 25.0),
-        "sync_pairs": (25.0, 55.0),
-        "integrity_scan": (55.0, 60.0),
-        "write_ephys": (60.0, 90.0),
-        "write_analog": (90.0, 99.0),
-    }
-    start, end = ranges.get(stage, (0.0, 100.0))
-    scaled = start + (end - start) * max(0.0, min(100.0, percent)) / 100.0
-    if scaled < 100.0 and scaled - _LAST_PROGRESS < 0.1:
+    """Emit percentage completed within the named stage, not a global estimate."""
+
+    global _LAST_PROGRESS_STAGE, _LAST_PROGRESS_PERCENT
+    normalized = max(0.0, min(100.0, float(percent)))
+    if stage != _LAST_PROGRESS_STAGE:
+        _LAST_PROGRESS_STAGE = stage
+        _LAST_PROGRESS_PERCENT = -1.0
+    normalized = max(_LAST_PROGRESS_PERCENT, normalized)
+    if normalized == _LAST_PROGRESS_PERCENT:
         return
-    _LAST_PROGRESS = max(_LAST_PROGRESS, scaled)
-    print(f"WILD_PROGRESS:{stage}:{_LAST_PROGRESS:.3f}", flush=True)
+    if normalized < 100.0 and normalized - _LAST_PROGRESS_PERCENT < 0.1:
+        return
+    _LAST_PROGRESS_PERCENT = normalized
+    print(f"WILD_PROGRESS:{stage}:{normalized:.3f}", flush=True)
 
 
 def _validated_job(job: dict[str, object]) -> tuple[list[Path], list[int], list[dict[str, object]]]:
@@ -72,13 +59,22 @@ def _validated_job(job: dict[str, object]) -> tuple[list[Path], list[int], list[
     if master_index < 1 or master_index > len(folders):
         raise ValueError("worker job master_index is outside selected device_folders")
     explicit = job.get("recording_start_ms")
+    allow_folder_name_fallback = job.get("allow_folder_name_start_fallback", False)
+    if not isinstance(allow_folder_name_fallback, bool):
+        raise ValueError("allow_folder_name_start_fallback must be a boolean")
     anchors: list[dict[str, object]] = []
     for index, folder in enumerate(folders, start=1):
-        start_ms, source = resolve_recording_start_ms(
-            folder,
-            explicit_recording_start_ms=(int(explicit) if explicit is not None and index == master_index else None),
-        )
-        recording_date, date_source = _recording_date_from_folder(folder)
+        try:
+            start_ms, source = resolve_recording_start_ms(
+                folder,
+                explicit_recording_start_ms=(int(explicit) if explicit is not None and index == master_index else None),
+                allow_folder_name_fallback=allow_folder_name_fallback,
+            )
+        except ValueError as exc:
+            raise ValueError(f"{folder}: {exc}") from exc
+        hint = read_ce_params_hint(folder)
+        recording_date = hint.recording_date
+        date_source = "CE_params.bin" if recording_date is not None else None
         anchors.append(
             {
                 "milliseconds_since_midnight": start_ms,
@@ -101,10 +97,12 @@ def _validated_job(job: dict[str, object]) -> tuple[list[Path], list[int], list[
 
 
 def run_job(job_path: Path) -> int:
-    global _LAST_PROGRESS
-    _LAST_PROGRESS = -1.0
+    global _LAST_PROGRESS_STAGE, _LAST_PROGRESS_PERCENT
+    _LAST_PROGRESS_STAGE = None
+    _LAST_PROGRESS_PERCENT = -1.0
     job = json.loads(job_path.read_text(encoding="utf-8"))
     folders, probe_indices, recording_start_anchors = _validated_job(job)
+    allow_folder_name_fallback = bool(job.get("allow_folder_name_start_fallback", False))
     options = SyncOptions(**job.get("sync_options", {}))
     pc_time_options = PcTimeOptions(**job.get("pc_time_options", {}))
     result = run_multidevice_sync(
@@ -117,6 +115,7 @@ def run_job(job_path: Path) -> int:
         progress=_progress,
         native_pc_time=True,
         recording_start_ms=job.get("recording_start_ms"),
+        allow_folder_name_start_fallback=allow_folder_name_fallback,
         pc_time_options=pc_time_options,
         probe_indices=probe_indices,
         recording_start_anchors=recording_start_anchors,
@@ -156,6 +155,11 @@ def run_job(job_path: Path) -> int:
     if overall_status == "MERGE_ONLY":
         print("Python sync and merge complete with a PC-time warning; pc_time.dat was not published.")
         return 0
+    if pc_time_status == "WARN":
+        print(
+            "Python native pc_time.dat was published from the fitted clock with a QC warning; "
+            "review pc_time_fit_summary.png and the manifest diagnostics."
+        )
     imu_text = (
         ", and synchronized IMU"
         if imu_status == "OK"

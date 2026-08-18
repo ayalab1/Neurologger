@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 import numpy as np
 
@@ -176,6 +176,7 @@ def write_canonical_interval_pc_time(
     canonical_start_sample: int,
     n_samples: int,
     chunk_samples: int = 1_000_000,
+    progress: Callable[[float], None] | None = None,
 ) -> Path:
     """Write daily uint32 PC timestamps on final canonical coordinates.
 
@@ -192,6 +193,7 @@ def write_canonical_interval_pc_time(
         common_start_master_sample=int(canonical_start_sample),
         n_samples=int(n_samples),
         chunk_samples=chunk_samples,
+        progress=progress,
     )
 
 

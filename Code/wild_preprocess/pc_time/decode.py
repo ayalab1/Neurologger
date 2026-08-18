@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import struct
 from dataclasses import asdict, dataclass
+from datetime import date
 from pathlib import Path
 from typing import Callable, Sequence, overload
 
@@ -18,6 +19,10 @@ PACKED_PC_DELAY_SHIFT = 20
 PACKED_PC_DELAY_MASK = (1 << 12) - 1
 RAW_MISC_BLOCK_BYTES = 512
 EXPANDED_SAMPLES_PER_RAW_CYCLE = 16
+CE_PARAMS_DATE_OFFSET = 332
+CE_PARAMS_TIME_OFFSET = 336
+CE_PARAMS_DATE_SIZE = 4
+CE_PARAMS_TIME_SIZE = 20
 
 
 @dataclass(frozen=True)
@@ -83,6 +88,7 @@ class CeParamsHint:
     ephys_sample_rate_hz: int | None = None
     misc_sample_rate_hz: int | None = None
     recording_start_ms: int | None = None
+    recording_date: str | None = None
 
 
 def infer_recording_start_from_name(path: Path) -> int | None:
@@ -100,24 +106,38 @@ def infer_recording_start_from_name(path: Path) -> int | None:
     return ((hours * 3600 + minutes * 60 + seconds) * 1000) + millis
 
 
-def decode_ce_params_recording_start_ms(data: bytes) -> int | None:
-    """Decode CE header time when the optional date/time header is populated."""
+def _decode_ce_params_recording_start(data: bytes) -> tuple[int, str] | None:
+    """Decode the CE RTC date and daily start time from the system header."""
 
-    if len(data) < 376:
-        return None
-    _weekday, month, day, year = struct.unpack_from("<BBBB", data, 336)
-    hours, minutes, seconds, _time_format = struct.unpack_from("<BBBB", data, 356)
-    sub_seconds, second_fraction, _daylight_saving, _store_operation = struct.unpack_from(
-        "<IIII", data, 360
+    minimum_length = max(
+        CE_PARAMS_DATE_OFFSET + CE_PARAMS_DATE_SIZE,
+        CE_PARAMS_TIME_OFFSET + CE_PARAMS_TIME_SIZE,
     )
-    if not (0 <= year <= 99 and 1 <= month <= 12 and 1 <= day <= 31):
+    if len(data) < minimum_length:
+        return None
+    _weekday, month, day, year = struct.unpack_from("<BBBB", data, CE_PARAMS_DATE_OFFSET)
+    hours, minutes, seconds, _time_format = struct.unpack_from("<BBBB", data, CE_PARAMS_TIME_OFFSET)
+    sub_seconds, second_fraction, _daylight_saving, _store_operation = struct.unpack_from(
+        "<IIII", data, CE_PARAMS_TIME_OFFSET + 4
+    )
+    try:
+        recording_date = date(2000 + year, month, day)
+    except ValueError:
         return None
     if hours > 23 or minutes > 59 or seconds > 59:
         return None
     millis = 0
     if second_fraction > 0 and sub_seconds <= second_fraction:
         millis = ((second_fraction - sub_seconds) * 1000) // (second_fraction + 1)
-    return ((hours * 3600 + minutes * 60 + seconds) * 1000) + millis
+    start_ms = ((hours * 3600 + minutes * 60 + seconds) * 1000) + millis
+    return start_ms, recording_date.isoformat()
+
+
+def decode_ce_params_recording_start_ms(data: bytes) -> int | None:
+    """Decode milliseconds since midnight from the CE RTC metadata."""
+
+    decoded = _decode_ce_params_recording_start(data)
+    return decoded[0] if decoded is not None else None
 
 
 def read_ce_params_hint(recording_folder: Path) -> CeParamsHint:
@@ -130,10 +150,12 @@ def read_ce_params_hint(recording_folder: Path) -> CeParamsHint:
     ephys_rate = struct.unpack_from("<I", data, 0)[0]
     sampling_rate_0 = struct.unpack_from("<I", data, 40)[0]
     misc_rate = struct.unpack_from("<I", data, 52)[0]
+    decoded_start = _decode_ce_params_recording_start(data)
     return CeParamsHint(
         ephys_sample_rate_hz=(ephys_rate or sampling_rate_0) or None,
         misc_sample_rate_hz=misc_rate or None,
-        recording_start_ms=decode_ce_params_recording_start_ms(data),
+        recording_start_ms=(decoded_start[0] if decoded_start is not None else None),
+        recording_date=(decoded_start[1] if decoded_start is not None else None),
     )
 
 
@@ -141,8 +163,9 @@ def resolve_recording_start_ms(
     recording_folder: Path,
     *,
     explicit_recording_start_ms: int | None = None,
+    allow_folder_name_fallback: bool = False,
 ) -> tuple[int, str]:
-    """Resolve an absolute daily anchor; never silently use midnight."""
+    """Resolve an absolute daily anchor without trusting folder names by default."""
 
     if explicit_recording_start_ms is not None:
         if not 0 <= int(explicit_recording_start_ms) < DAY_MS:
@@ -151,10 +174,18 @@ def resolve_recording_start_ms(
     hint = read_ce_params_hint(recording_folder)
     if hint.recording_start_ms is not None:
         return hint.recording_start_ms, "CE_params.bin"
-    from_name = infer_recording_start_from_name(recording_folder)
-    if from_name is not None:
-        return from_name, "recording folder name"
-    raise ValueError("No absolute recording-start anchor in CE_params.bin, folder name, or worker job.")
+    if allow_folder_name_fallback:
+        from_name = infer_recording_start_from_name(recording_folder)
+        if from_name is not None:
+            return from_name, "recording folder name (explicit fallback)"
+        raise ValueError(
+            "No absolute recording-start anchor in CE_params.bin or the explicit worker job, and "
+            "the recording folder name is not a supported HHMMSS[.mmm] fallback."
+        )
+    raise ValueError(
+        "No absolute recording-start anchor in CE_params.bin or the explicit worker job; "
+        "recording-folder fallback is disabled."
+    )
 
 
 def _packed_updates_from_words(

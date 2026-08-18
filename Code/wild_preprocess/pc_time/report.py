@@ -73,7 +73,7 @@ def write_pc_time_summary_png(
     end_sec = (common_start_master_sample + n_samples - 1) / sample_rate_hz
     time_sec = model.device_ms / 1000.0
     fig, (ax_fit, ax_residual) = plt.subplots(2, 1, figsize=(12, 7), sharex=True, constrained_layout=True)
-    ax_fit.axvspan(start_sec, end_sec, color="#e8f4e8", label="published interval")
+    ax_fit.axvspan(start_sec, end_sec, color="#e8f4e8", label="canonical interval")
     ax_fit.scatter(time_sec[~model.keep_mask], model.pc_unwrapped_ms[~model.keep_mask] / 60000.0, s=10, c="#c33", label="discarded")
     ax_fit.scatter(time_sec[model.keep_mask], model.pc_unwrapped_ms[model.keep_mask] / 60000.0, s=10, c="#1677b3", label="kept")
     fitted = model.predict_unwrapped_ms(model.device_ms) / 60000.0

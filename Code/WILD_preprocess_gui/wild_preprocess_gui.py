@@ -25,12 +25,66 @@ CODE_ROOT = REPO_ROOT / "Code"
 if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
-from wild_preprocess.pc_time import align_pc_time_file
+from wild_preprocess.pc_time import align_pc_time_file, read_ce_params_hint
 
 PC_TIME_SCRIPT = CODE_ROOT / "WILD_generate_pc_time.py"
 PYTHON_BACKEND_WORKER = CODE_ROOT / "wild_preprocess" / "worker.py"
 SYNC_BACKEND = os.environ.get("WILD_SYNC_BACKEND", "python").strip().lower()
 DAY_MS = 24 * 60 * 60 * 1000
+PIPELINE_PROGRESS_STAGES: tuple[tuple[str, str], ...] = (
+    ("inspect_inputs", "Inspect inputs"),
+    ("build_features", "Build synchronization features"),
+    ("sync_pairs", "Synchronize loggers"),
+    ("refine_sync", "Refine timing models"),
+    ("integrity_scan", "Scan data integrity"),
+    ("write_ephys", "Write neural data"),
+    ("write_analog", "Write analog data"),
+    ("postmerge_qc", "Validate merged data"),
+    ("pc_time", "Fit PC time"),
+    ("imu", "Process synchronized IMU"),
+    ("inspection", "Build QC report"),
+    ("publish", "Publish outputs"),
+)
+_PIPELINE_PROGRESS_LABELS = {
+    stage: (index, label)
+    for index, (stage, label) in enumerate(PIPELINE_PROGRESS_STAGES, start=1)
+}
+
+
+def stage_progress_text(stage: str, percent: float) -> str:
+    """Return a stable user-facing label for stage-local progress."""
+
+    value = max(0, min(100, int(round(percent))))
+    if stage == "complete":
+        return "Complete - 100%"
+    if stage in _PIPELINE_PROGRESS_LABELS:
+        index, label = _PIPELINE_PROGRESS_LABELS[stage]
+        return f"Step {index}/{len(PIPELINE_PROGRESS_STAGES)} - {label} - {value}%"
+    return f"{stage.replace('_', ' ').strip().title()} - {value}%"
+
+
+def _python_worker_job(
+    selected: list[RecordingInfo],
+    *,
+    master_index: int,
+    output_folder: Path,
+    overwrite: bool,
+) -> dict[str, Any]:
+    """Build the standard GUI job; synchronized IMU is not optional here."""
+
+    return {
+        "schema_version": 3,
+        "device_folders": [str(rec.folder) for rec in selected],
+        "probe_indices": [int(rec.probe_index) for rec in selected],
+        "master_index": master_index,
+        "output_folder": str(output_folder),
+        "overwrite": overwrite,
+        "merge": True,
+        "sync_options": {"chunk_seconds": 5.0},
+        "pc_time_options": {},
+        "allow_folder_name_start_fallback": False,
+        "process_imu": True,
+    }
 
 
 @dataclass
@@ -216,7 +270,11 @@ def pc_time_valid_for_recording(path: Path, recording: RecordingInfo) -> bool:
             return False
         if pc_payload.get("merge_run_id") != manifest.get("run_id"):
             return False
-        if pc_payload.get("status") != "ok" or not pc_payload.get("aligned_to_merge", False):
+        pc_status = str(pc_payload.get("status", "")).lower()
+        published_status = pc_status == "ok" or (
+            pc_status in {"warn", "warning"} and pc_payload.get("published") is True
+        )
+        if not published_status or not pc_payload.get("aligned_to_merge", False):
             return False
         try:
             provenance_matches = (
@@ -235,9 +293,11 @@ def pc_time_valid_for_recording(path: Path, recording: RecordingInfo) -> bool:
             pc_payload = _read_json_object(basepath_pc_time_qc_path(path.parent))
             if not pc_payload or pc_payload.get("merge_run_id") != merge_payload["run_id"]:
                 return False
-            if pc_payload.get("status") != "ok" or not pc_payload.get(
-                "aligned_to_merge", False
-            ):
+            pc_status = str(pc_payload.get("status", "")).lower()
+            published_status = pc_status == "ok" or (
+                pc_status in {"warn", "warning"} and pc_payload.get("published") is True
+            )
+            if not published_status or not pc_payload.get("aligned_to_merge", False):
                 return False
             try:
                 provenance_matches = (
@@ -441,6 +501,16 @@ def preflight_checks(recordings: list[RecordingInfo], basepath: Path | None = No
         if not rec.ce_params_file.exists():
             status = "FAIL"
             details.append("missing CE_params.bin")
+        else:
+            try:
+                start_hint = read_ce_params_hint(rec.folder)
+            except OSError as exc:
+                status = "FAIL"
+                details.append(f"cannot read CE_params.bin: {exc}")
+            else:
+                if start_hint.recording_start_ms is None or start_hint.recording_date is None:
+                    status = "FAIL"
+                    details.append("invalid/missing CE RTC date/time at bytes 332-355")
         amp_bytes = _file_size(rec.amplifier_file)
         if amp_bytes is not None and rec.n_channels and amp_bytes % (2 * rec.n_channels) != 0:
             status = "FAIL"
@@ -662,16 +732,6 @@ def main() -> int:
 
             run = QGroupBox("Run")
             run_grid = QGridLayout(run)
-            self.generate_lfp = QCheckBox("generate LFP")
-            self.generate_lfp.setChecked(False)
-            self.generate_lfp.setEnabled(True)
-            self.generate_lfp.setToolTip("Requested LFP generation. For 3+ loggers this waits until reviewed merged dat writing is enabled.")
-            self.generate_imu = QCheckBox("generate synchronized IMU")
-            self.generate_imu.setChecked(False)
-            self.generate_imu.setToolTip(
-                "Create IMU.mat with MATLAB-compatible calibration and sensor fusion from the "
-                "synchronized merged analogin.dat and its analog validity mask."
-            )
             self.progress_label = QLabel("Idle")
             self.progress_bar = QProgressBar()
             self.progress_bar.setRange(0, 100)
@@ -682,12 +742,10 @@ def main() -> int:
             force_stop = QPushButton("Force stop")
             force_stop.setObjectName("dangerButton")
             force_stop.clicked.connect(self._force_stop)
-            run_grid.addWidget(self.generate_lfp, 0, 0, 1, 2)
-            run_grid.addWidget(self.generate_imu, 1, 0, 1, 2)
-            run_grid.addWidget(self.progress_label, 2, 0, 1, 2)
-            run_grid.addWidget(self.progress_bar, 3, 0, 1, 2)
-            run_grid.addWidget(run_selected, 4, 0)
-            run_grid.addWidget(force_stop, 4, 1)
+            run_grid.addWidget(self.progress_label, 0, 0, 1, 2)
+            run_grid.addWidget(self.progress_bar, 1, 0, 1, 2)
+            run_grid.addWidget(run_selected, 2, 0)
+            run_grid.addWidget(force_stop, 2, 1)
 
             layout.addWidget(session)
             layout.addWidget(run)
@@ -985,13 +1043,14 @@ def main() -> int:
             # The Python worker owns native PC-time generation.  Only the
             # explicit MATLAB fallback continues into the legacy script.
             self._continue_after_sync_qc = SYNC_BACKEND == "matlab"
-            lfp_text = " with LFP requested" if self.generate_lfp.isChecked() else ""
-            imu_text = " and synchronized IMU" if self.generate_imu.isChecked() else ""
             if SYNC_BACKEND == "matlab":
                 pipeline_text = "logger synchronization check, master pc_time.dat generation, then legacy 2-logger merge"
             else:
-                pipeline_text = "Python logger synchronization, merge, post-merge QC, and native master pc_time.dat generation"
-            self._append_log("Run pipeline: " + pipeline_text + imu_text + lfp_text + ".")
+                pipeline_text = (
+                    "Python logger synchronization, merge, post-merge QC, native master "
+                    "pc_time.dat generation, and synchronized IMU"
+                )
+            self._append_log("Run pipeline: " + pipeline_text + ".")
             self._set_progress("Starting", 0)
             if len(selected) >= 2:
                 self._start_logger_sync_qc()
@@ -1004,10 +1063,7 @@ def main() -> int:
             if len(selected) == 2 and SYNC_BACKEND == "matlab":
                 self._start_documented_matlab_workflow()
             elif len(selected) > 2:
-                if self.generate_lfp.isChecked():
-                    self._append_log("LFP generation requested, but not run yet: multi-logger amplifier.dat/analogin.dat and master pc_time.dat are ready for review.")
-                else:
-                    self._append_log("Run complete: multi-logger amplifier.dat/analogin.dat and master pc_time.dat are ready for review.")
+                self._append_log("Run complete: multi-logger amplifier.dat/analogin.dat and master pc_time.dat are ready for review.")
             else:
                 self._append_log("Run complete.")
 
@@ -1128,18 +1184,12 @@ def main() -> int:
                 self._continue_after_sync_qc = False
                 QMessageBox.critical(self, "Python backend unavailable", f"Missing backend worker:\n{PYTHON_BACKEND_WORKER}")
                 return
-            job = {
-                "schema_version": 3,
-                "device_folders": [str(rec.folder) for rec in selected],
-                "probe_indices": [int(rec.probe_index) for rec in selected],
-                "master_index": master_index,
-                "output_folder": str(self.basepath),
-                "overwrite": self.overwrite_outputs.isChecked(),
-                "merge": True,
-                "sync_options": {"chunk_seconds": 5.0},
-                "pc_time_options": {},
-                "process_imu": self.generate_imu.isChecked(),
-            }
+            job = _python_worker_job(
+                selected,
+                master_index=master_index,
+                output_folder=self.basepath,
+                overwrite=self.overwrite_outputs.isChecked(),
+            )
             handle = tempfile.NamedTemporaryFile(
                 mode="w",
                 suffix=".json",
@@ -1166,8 +1216,6 @@ def main() -> int:
                 if idx != master_index:
                     self._append_log(f"  slave:  {rec.device_id}/{rec.recording_name}")
             self._append_log(f"  output: {self.basepath}")
-            if self.generate_lfp.isChecked():
-                self._append_log("LFP generation remains deferred during the Python synchronization backend migration.")
             process.start()
 
         def _backend_process_error(self, error: QProcess.ProcessError) -> None:
@@ -1240,8 +1288,11 @@ def main() -> int:
                             "Python merge completed with a PC-time warning; "
                             "merged neural streams remain available, but pc_time.dat was not published."
                         )
-                    elif self.generate_lfp.isChecked():
-                        self._append_log("Python run complete; LFP generation remains deferred.")
+                    elif manifest is not None and manifest.get("pc_time_status") == "WARN":
+                        self._append_log(
+                            "Python pc_time.dat was published from the fitted clock with a QC warning; "
+                            "review pc_time_fit_summary.png and manifest diagnostics."
+                        )
                     else:
                         self._append_log("Python run complete: merged streams and native pc_time.dat are ready for review.")
                 elif return_code == 3:
@@ -1283,6 +1334,16 @@ def main() -> int:
         def _generate_master_pc_time(self) -> None:
             if self._pc_time_process is not None:
                 self._append_log("Blocked: pc_time generation is already running.")
+                return
+            if SYNC_BACKEND != "matlab" and (self.basepath / "wild_preprocess_run.json").is_file():
+                self._continue_after_pc_time = False
+                message = (
+                    "Standalone pc_time regeneration is disabled for Python pipeline outputs. "
+                    "Run the full preprocessing pipeline so packed-clock publication uses the "
+                    "canonical analog mapping and native scientific QC gates."
+                )
+                self._append_log("Blocked: " + message)
+                QMessageBox.warning(self, "Use full preprocessing", message)
                 return
             master = self._master_recording()
             if master is None:
@@ -1440,10 +1501,7 @@ def main() -> int:
             elif return_code == 0 and master.pc_time_valid:
                 selected_count = len(self._selected_recordings_for_run())
                 if selected_count > 2:
-                    if self.generate_lfp.isChecked():
-                        self._append_log("Run complete without LFP: multi-logger amplifier.dat/analogin.dat and master pc_time.dat are ready for review.")
-                    else:
-                        self._append_log("Run complete: multi-logger amplifier.dat/analogin.dat and master pc_time.dat are ready for review.")
+                    self._append_log("Run complete: multi-logger amplifier.dat/analogin.dat and master pc_time.dat are ready for review.")
                 else:
                     self._append_log("Run complete.")
                 self._set_progress("Complete", 100)
@@ -1461,17 +1519,17 @@ def main() -> int:
 
         def _set_progress(self, label: str, value: float) -> None:
             value_int = max(0, min(100, int(round(value))))
-            self.progress_label.setText(label)
+            self.progress_label.setText(stage_progress_text(label, value_int))
             self.progress_bar.setValue(value_int)
 
         def _update_progress_from_text(self, text: str) -> None:
             for match in self._progress_re.finditer(text):
-                label = match.group(1).replace("_", " ")
+                stage = match.group(1)
                 try:
                     value = float(match.group(2))
                 except ValueError:
                     continue
-                self._set_progress(label, value)
+                self._set_progress(stage, value)
 
         def _remove_progress_lines(self, text: str) -> str:
             lines = [line for line in text.splitlines() if not line.startswith("WILD_PROGRESS:")]

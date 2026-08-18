@@ -991,6 +991,8 @@ def _merge_recordings_into_folder(
     published_output_folder = output_folder if published_output_folder is None else published_output_folder
     if timing is not None:
         timing("ephys_merge", "start", 0, 0)
+    if progress is not None:
+        progress("write_ephys", 0.0)
     try:
         ephys_samples, total_channels = _write_interleaved_stream(
             amplifier_path,
@@ -1025,6 +1027,8 @@ def _merge_recordings_into_folder(
     analog_timelines: list[AnalogTimelineResult] = []
     if timing is not None:
         timing("analog_merge", "start", 0, 0)
+    if progress is not None:
+        progress("write_analog", 0.0)
     try:
         if analog_integrity_results is not None or analog_clock_priors is not None:
             if analog_integrity_results is None or analog_clock_priors is None:
@@ -1519,6 +1523,8 @@ def merge_recordings(
             ),
             encoding="utf-8",
         )
+        if progress is not None:
+            progress("publish", 0.0)
         for name in managed_names:
             destination = output_folder / name
             if destination.exists():

@@ -14,7 +14,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 from scipy.io import savemat
@@ -961,6 +961,7 @@ def build_imu_from_merged(
     source_analog_label: str = "analogin.dat",
     source_validity_label: str = "valid_analog_samples.dat",
     perform_sensor_fusion: bool = True,
+    progress: Callable[[float], None] | None = None,
 ) -> SynchronizedImuResult:
     """Build gap-safe IMU with MATLAB R2024b-compatible numerical stages.
 
@@ -1047,10 +1048,15 @@ def build_imu_from_merged(
     )
     devices: list[SynchronizedImuDevice] = []
     try:
+        if progress is not None:
+            progress(0.0)
         for start in range(0, canonical_rows, chunk_rows):
-            block = np.asarray(validity[start : min(canonical_rows, start + chunk_rows)])
+            end = min(canonical_rows, start + chunk_rows)
+            block = np.asarray(validity[start:end])
             if np.any((block != 0) & (block != 1)):
                 raise ValueError("valid_analog_samples.dat must contain only 0 and 1")
+            if progress is not None:
+                progress(10.0 * end / canonical_rows)
         for device_zero_based, recording in enumerate(normalized):
             lane_start = device_zero_based * 16 + IMU_LANES_ZERO_BASED[0]
             lane_end = lane_start + len(IMU_LANES_ZERO_BASED)
@@ -1142,6 +1148,10 @@ def build_imu_from_merged(
                     fusion=fusion,
                 )
             )
+            if progress is not None:
+                progress(
+                    10.0 + 90.0 * (device_zero_based + 1) / len(normalized)
+                )
     finally:
         close_memmap(merged)
         close_memmap(validity)
