@@ -12,8 +12,20 @@ CODE_ROOT = REPO_ROOT / "Code"
 if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
-from wild_preprocess.models import DeviceSyncAnchor, SyncObservation, SyncOptions, map_verified_device_sample
-from wild_preprocess.sync.gaps import detect_adaptive_change_points, detect_relative_offset_steps
+from wild_preprocess.models import (
+    DeviceSyncAnchor,
+    RelativeOffsetStep,
+    SyncObservation,
+    SyncOptions,
+    map_verified_device_sample,
+)
+from wild_preprocess.sync.gaps import (
+    AdaptiveChangePoint,
+    detect_adaptive_change_points,
+    detect_relative_offset_steps,
+    localize_adaptive_change_point,
+    localize_relative_offset_step,
+)
 from wild_preprocess.sync.infer import (
     anchors_from_accepted_observations,
     fit_independent_device_segments,
@@ -50,6 +62,190 @@ def _options() -> SyncOptions:
 
 
 class AdaptiveSegmentTests(unittest.TestCase):
+    def _point(self, *, boundary: int, delta: float) -> AdaptiveChangePoint:
+        return AdaptiveChangePoint(
+            canonical_boundary_sample=boundary,
+            time_sec=boundary / 100.0,
+            delta_samples=delta,
+            before_level_samples=0.0,
+            after_level_samples=delta,
+            uncertainty_samples=1.0,
+            before_slope_samples_per_second=0.0,
+            after_slope_samples_per_second=0.0,
+            confidence="high",
+            before_count=4,
+            after_count=4,
+            evidence="synthetic adaptive transition",
+        )
+
+    def test_full_rate_localization_recovers_missing_and_extra_source_boundaries(self) -> None:
+        fs = 100.0
+        physical_boundary = 1_500
+        rng = np.random.default_rng(341)
+        master = rng.normal(size=4_000).astype(np.float32)
+        options = SyncOptions(
+            window_seconds=2.0,
+            step_seconds=1.0,
+            endpoint_probe_seconds=1.0,
+            min_peak_correlation=0.05,
+            min_peak_margin_fraction=0.01,
+        )
+        for magnitude in (1, 4, 317):
+            cases = (
+                (
+                    -float(magnitude),
+                    np.concatenate(
+                        (master[:physical_boundary], master[physical_boundary + magnitude :])
+                    ),
+                ),
+                (
+                    float(magnitude),
+                    np.concatenate(
+                        (
+                            master[:physical_boundary],
+                            rng.normal(size=magnitude),
+                            master[physical_boundary:],
+                        )
+                    ),
+                ),
+            )
+            for delta, slave in cases:
+                with self.subTest(delta=delta):
+                    localized = localize_adaptive_change_point(
+                        master,
+                        np.asarray(slave, dtype=np.float32),
+                        self._point(boundary=1_450, delta=delta),
+                        fs=fs,
+                        options=options,
+                    )
+                    self.assertEqual(localized.localization_status, "localized")
+                    self.assertTrue(localized.sample_localized)
+                    self.assertLessEqual(abs(localized.canonical_boundary_sample - physical_boundary), 1)
+                    self.assertIn("two-window old/new preferences", localized.localization_evidence)
+
+    def test_first_candidate_optimum_is_rejected_as_search_edge(self) -> None:
+        fs = 10.0
+        approximate = 20
+        physical_boundary = 12
+        rng = np.random.default_rng(7_712)
+        master = rng.normal(size=50).astype(np.float32)
+        slave = np.concatenate(
+            (master[:physical_boundary], np.asarray([3.0], dtype=np.float32), master[physical_boundary:])
+        )
+        step = RelativeOffsetStep(
+            master_sample=approximate,
+            time_sec=approximate / fs,
+            offset_step_samples=1.0,
+            missing_samples=1,
+            offset_before_samples=0.0,
+            offset_after_samples=1.0,
+            confidence="high",
+            evidence="synthetic first-candidate transition",
+        )
+        refined = localize_relative_offset_step(
+            master,
+            slave,
+            step,
+            fs=fs,
+            options=SyncOptions(
+                window_seconds=0.5,
+                step_seconds=0.5,
+                unresolved_boundary_guard_samples=1,
+            ),
+        )
+        self.assertEqual(refined.master_sample, approximate)
+        self.assertIn("optimum was at the search edge", refined.evidence)
+
+    def test_unchanged_full_rate_mapping_rejects_adaptive_plateau_as_alias(self) -> None:
+        fs = 100.0
+        rng = np.random.default_rng(812)
+        signal = rng.normal(size=2_400).astype(np.float32)
+        point = self._point(boundary=1_000, delta=4.0)
+        result = localize_adaptive_change_point(
+            signal,
+            signal.copy(),
+            point,
+            fs=fs,
+            options=SyncOptions(
+                window_seconds=2.0,
+                step_seconds=1.0,
+                endpoint_probe_seconds=1.0,
+            ),
+        )
+        self.assertEqual(result.localization_status, "verified_alias")
+        self.assertFalse(result.sample_localized)
+
+    def test_periodic_full_rate_evidence_remains_unresolved(self) -> None:
+        fs = 100.0
+        samples = np.arange(2_400, dtype=np.float64)
+        signal = np.sin(2.0 * np.pi * samples / 4.0).astype(np.float32)
+        result = localize_adaptive_change_point(
+            signal,
+            signal.copy(),
+            self._point(boundary=1_000, delta=4.0),
+            fs=fs,
+            options=SyncOptions(
+                window_seconds=2.0,
+                step_seconds=1.0,
+                endpoint_probe_seconds=1.0,
+            ),
+        )
+        self.assertEqual(result.localization_status, "unresolved")
+        self.assertFalse(result.sample_localized)
+
+    def test_flat_boundary_plateau_wider_than_guard_remains_unresolved(self) -> None:
+        fs = 1_000.0
+        physical_boundary = 4_000
+        rng = np.random.default_rng(981)
+        master = rng.normal(size=8_000).astype(np.float32)
+        master[3_700:4_300] = 0.0
+        slave = np.concatenate(
+            (master[:physical_boundary], np.zeros(4, dtype=np.float32), master[physical_boundary:])
+        )
+        result = localize_adaptive_change_point(
+            master,
+            slave,
+            self._point(boundary=physical_boundary, delta=4.0),
+            fs=fs,
+            options=SyncOptions(
+                window_seconds=2.0,
+                step_seconds=1.0,
+                endpoint_probe_seconds=1.0,
+                unresolved_boundary_guard_samples=100,
+            ),
+        )
+        self.assertEqual(result.localization_status, "unresolved")
+        self.assertFalse(result.sample_localized)
+        self.assertIn("boundary refinement rejected", result.localization_evidence)
+
+    def test_large_positive_step_does_not_expand_localization_uncertainty(self) -> None:
+        fs = 1_000.0
+        physical_boundary = 4_000
+        rng = np.random.default_rng(1_227)
+        master = rng.normal(size=9_000).astype(np.float32)
+        master[3_850:4_150] = 0.0
+        slave = np.concatenate(
+            (
+                master[:physical_boundary],
+                np.zeros(1_000, dtype=np.float32),
+                master[physical_boundary:],
+            )
+        )
+        result = localize_adaptive_change_point(
+            master,
+            slave,
+            self._point(boundary=physical_boundary, delta=1_000.0),
+            fs=fs,
+            options=SyncOptions(
+                window_seconds=2.0,
+                step_seconds=1.0,
+                endpoint_probe_seconds=1.0,
+                unresolved_boundary_guard_samples=100,
+            ),
+        )
+        self.assertEqual(result.localization_status, "unresolved")
+        self.assertFalse(result.sample_localized)
+
     def test_detects_arbitrary_verified_steps_including_below_legacy_fifty(self) -> None:
         for step in (1, 5, 49, 50, 317):
             with self.subTest(step=step):
@@ -209,6 +405,7 @@ class AdaptiveSegmentTests(unittest.TestCase):
         )
         self.assertEqual(len(segments), 1)
         self.assertIsNone(map_verified_device_sample(segments, 600, device_index=2))
+
 
 
 if __name__ == "__main__":

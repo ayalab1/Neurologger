@@ -72,13 +72,27 @@ class SyncOptions:
     # complete fitted segment.  These options are appended for positional API
     # compatibility with earlier SyncOptions construction.
     postmerge_max_residual_lag_samples: int = 4
-    postmerge_dense_step_seconds: float = 30.0
+    postmerge_dense_step_seconds: float = 5.0
     postmerge_min_correction_windows: int = 3
     postmerge_lag_consistency_samples: float = 2.0
     # Offset steps are already refined at full sample rate.  Keep a bounded
     # local guard around an unattributed boundary instead of invalidating the
     # complete overlapping 10 s correlation-window envelope on every device.
     unresolved_boundary_guard_samples: int = 100
+    # A reliable residual-lag failure keeps the surrounding alignment quality
+    # closed until consecutive passing windows re-establish synchronization.
+    # Appended for positional compatibility with existing SyncOptions callers.
+    postmerge_recovery_pass_windows: int = 2
+    # Analysis-facing tolerance expressed in time.  The legacy sample limit is
+    # retained as a lower bound, while ordinary 20 kHz WILD recordings use a
+    # one-millisecond residual-lag allowance by default.
+    postmerge_max_residual_lag_ms: float = 1.0
+    # A single reliable failure remains window-local.  Continuous expansion is
+    # reserved for repeated independent evidence in the same fitted segment.
+    postmerge_min_continuous_failure_windows: int = 2
+    # Low-specificity correlation is retained as a manifest warning but is not
+    # itself evidence that the staged neural mapping is misaligned.
+    postmerge_mask_unreliable_windows: bool = False
 
 
 @dataclass

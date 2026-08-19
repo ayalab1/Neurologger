@@ -7,6 +7,7 @@ from Code.wild_preprocess.analog.imu_preprocess import prepare_imu_prefusion
 from Code.wild_preprocess.analog.imu_fusion import fuse_imu_ahrs
 from Code.wild_preprocess.analog.imu_motion import compute_imu_motion
 from Code.wild_preprocess.validation.imu_reference import (
+    _quaternion_metrics,
     compare_matlab_fusion_reference,
     compare_matlab_prefusion_reference,
     write_matlab_parity_report,
@@ -44,6 +45,79 @@ def _reference_file(path, source: np.ndarray) -> None:
             stored = handle.create_dataset(f"value_{name}", data=stored_value)
             links = device.create_dataset(name, shape=(1, 1), dtype=h5py.ref_dtype)
             links[0, 0] = stored.ref
+
+
+def test_quaternion_metrics_is_exact_for_identical_inputs_without_mutation() -> None:
+    actual = np.asarray(
+        [
+            [2.0, 0.0, 0.0, 0.0],
+            [0.5, -0.5, 0.5, -0.5],
+        ]
+    )
+    expected = actual.copy()
+    actual_before = actual.copy()
+    expected_before = expected.copy()
+
+    metrics = _quaternion_metrics(actual, expected)
+
+    assert metrics.max_angle_degrees == 0.0
+    assert metrics.rms_angle_degrees == 0.0
+    assert metrics.mean_angle_degrees == 0.0
+    assert metrics.p99_angle_degrees == 0.0
+    np.testing.assert_array_equal(actual, actual_before)
+    np.testing.assert_array_equal(expected, expected_before)
+
+
+def test_quaternion_metrics_is_sign_invariant() -> None:
+    actual = np.asarray(
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.5, -0.5, 0.5, -0.5],
+        ]
+    )
+
+    metrics = _quaternion_metrics(actual, -actual)
+
+    assert metrics.max_angle_degrees == 0.0
+    assert metrics.rms_angle_degrees == 0.0
+
+
+def test_quaternion_metrics_resolves_a_sub_microdegree_rotation() -> None:
+    angle_degrees = 1e-7
+    half_angle = np.deg2rad(angle_degrees) / 2.0
+    actual = np.asarray([[1.0, 0.0, 0.0, 0.0]])
+    expected = np.asarray([[np.cos(half_angle), np.sin(half_angle), 0.0, 0.0]])
+
+    metrics = _quaternion_metrics(actual, expected)
+
+    np.testing.assert_allclose(
+        metrics.max_angle_degrees,
+        angle_degrees,
+        rtol=1e-12,
+        atol=1e-15,
+    )
+
+
+def test_quaternion_metrics_handles_the_180_degree_boundary() -> None:
+    actual = np.asarray(
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        ]
+    )
+    expected = np.asarray(
+        [
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0, 0.0],
+        ]
+    )
+
+    metrics = _quaternion_metrics(actual, expected)
+
+    assert metrics.max_angle_degrees == 180.0
+    assert metrics.rms_angle_degrees == 180.0
+    assert metrics.mean_angle_degrees == 180.0
+    assert metrics.p99_angle_degrees == 180.0
 
 
 def test_full_prefusion_validation_reads_matlab_v73_layout(tmp_path) -> None:

@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -67,12 +68,15 @@ class SessionInspectionTest(unittest.TestCase):
         )
         mask = np.ones((300, 2), dtype=np.uint8)
         mask[100:110, 1] = 0
+        alignment = mask.copy()
+        alignment[200:220, 1] = 0
         with tempfile.TemporaryDirectory() as temporary:
             output = write_session_inspection_png(
                 Path(temporary) / "inspection.png",
                 sample_rate_hz=100.0,
                 pairs=[_pair()],
                 valid_samples=mask,
+                alignment_quality=alignment,
                 device_labels=["master", "slave 1"],
                 reason_intervals=[InspectionInterval(100, 110, "duplication", (1,))],
                 join_events=[JoinResidual(1.1, 0.3, "accepted", "join-1")],
@@ -83,6 +87,61 @@ class SessionInspectionTest(unittest.TestCase):
             )
             self.assertTrue(output.is_file())
             self.assertGreater(output.stat().st_size, 10_000)
+
+    def test_alignment_panel_reports_master_slave_and_common_states(self) -> None:
+        figures = []
+        validity = np.ones((100, 3), dtype=np.uint8)
+        validity[80:90, 1] = 0
+        alignment = validity.copy()
+        alignment[20:40, 1] = 0
+        alignment[50:70, 2] = 0
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch(
+                "wild_preprocess.inspection.plt.close", side_effect=figures.append
+            ):
+                write_session_inspection_png(
+                    Path(temporary) / "inspection.png",
+                    sample_rate_hz=1_000.0,
+                    valid_samples=validity,
+                    alignment_quality=alignment,
+                    device_labels=["master", "slave 1", "slave 2"],
+                    alignment_tolerance_samples=1.0,
+                )
+        self.assertEqual(len(figures), 1)
+        figure = figures[0]
+        try:
+            self.assertEqual(len(figure.axes), 4)
+            alignment_axis = figure.axes[2]
+            self.assertIn("limit ±1 ms", alignment_axis.get_title())
+            row_labels = [item.get_text() for item in alignment_axis.get_yticklabels()]
+            self.assertTrue(any(label.startswith("M-S1 aligned") for label in row_labels))
+            self.assertTrue(any(label.startswith("M-S2 aligned") for label in row_labels))
+            self.assertTrue(any(label.startswith("all aligned to M") for label in row_labels))
+            legend_labels = [
+                item.get_text() for item in alignment_axis.get_legend().get_texts()
+            ]
+            self.assertEqual(
+                legend_labels, ["aligned", "sync warning", "data invalid"]
+            )
+            self.assertIn("common valid 90.000%", figure._suptitle.get_text())
+            self.assertIn("common sync-safe 50.000%", figure._suptitle.get_text())
+        finally:
+            import matplotlib.pyplot as plt
+
+            plt.close(figure)
+
+    def test_alignment_quality_cannot_exceed_data_validity(self) -> None:
+        validity = np.ones((10, 2), dtype=np.uint8)
+        validity[5, 1] = 0
+        alignment = np.ones((10, 2), dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(ValueError, "outside valid_samples"):
+                write_session_inspection_png(
+                    Path(temporary) / "inspection.png",
+                    sample_rate_hz=1_000.0,
+                    valid_samples=validity,
+                    alignment_quality=alignment,
+                )
 
     def test_writes_from_interleaved_validity_file_and_degrades_without_pc_or_camera(self) -> None:
         mask = np.ones((20, 3), dtype=np.uint8)

@@ -30,6 +30,7 @@ class VerifiedPairChange:
     canonical_sample: int
     delta_samples: int
     evidence: str = ""
+    boundary_localized: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.slave_device_index, Integral) or self.slave_device_index < 1:
@@ -77,6 +78,7 @@ class AttributionDecision:
     device_indices: tuple[int, ...]
     delta_samples: int
     evidence: str
+    boundary_localized: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in _ATTRIBUTION_KINDS:
@@ -94,7 +96,7 @@ class AttributionDecision:
 
 def _validate_configuration(
     *, device_count: int, master_device_index: int, event_tolerance_samples: int,
-    magnitude_tolerance_samples: int,
+    magnitude_tolerance_samples: int, localized_boundary_tolerance_samples: int,
 ) -> set[int]:
     if not isinstance(device_count, Integral) or device_count < 2:
         raise ValueError("device_count must be an integer of at least two")
@@ -104,6 +106,11 @@ def _validate_configuration(
         raise ValueError("event_tolerance_samples must be a non-negative integer")
     if not isinstance(magnitude_tolerance_samples, Integral) or magnitude_tolerance_samples < 0:
         raise ValueError("magnitude_tolerance_samples must be a non-negative integer")
+    if (
+        not isinstance(localized_boundary_tolerance_samples, Integral)
+        or localized_boundary_tolerance_samples < 0
+    ):
+        raise ValueError("localized_boundary_tolerance_samples must be a non-negative integer")
     return set(range(1, device_count + 1)) - {master_device_index}
 
 
@@ -190,7 +197,11 @@ def _stable_slave_graph(
 
 
 def _unresolved(
-    *, canonical_sample: int, cluster: tuple[VerifiedPairChange, ...], reason: str
+    *,
+    canonical_sample: int,
+    cluster: tuple[VerifiedPairChange, ...],
+    reason: str,
+    localized_boundary_tolerance_samples: int,
 ) -> AttributionDecision:
     return AttributionDecision(
         kind="unresolved",
@@ -198,7 +209,24 @@ def _unresolved(
         device_indices=tuple(sorted({change.slave_device_index for change in cluster})),
         delta_samples=cluster[0].delta_samples,
         evidence=reason,
+        boundary_localized=_localized_boundaries_concordant(
+            cluster,
+            tolerance_samples=localized_boundary_tolerance_samples,
+        ),
     )
+
+
+def _localized_boundaries_concordant(
+    cluster: tuple[VerifiedPairChange, ...],
+    *,
+    tolerance_samples: int,
+) -> bool:
+    """Require every member to be localized within one sample-scale span."""
+
+    if not cluster or not all(change.boundary_localized for change in cluster):
+        return False
+    samples = [change.canonical_sample for change in cluster]
+    return max(samples) - min(samples) <= tolerance_samples
 
 
 def attribute_targeted_events(
@@ -210,6 +238,7 @@ def attribute_targeted_events(
     slave_slave_evidence: Iterable[SlaveSlaveEvidence] = (),
     event_tolerance_samples: int = 0,
     magnitude_tolerance_samples: int = 0,
+    localized_boundary_tolerance_samples: int = 0,
 ) -> tuple[AttributionDecision, ...]:
     """Classify local transitions without fabricating attribution from one pair.
 
@@ -232,6 +261,7 @@ def attribute_targeted_events(
         master_device_index=master_device_index,
         event_tolerance_samples=event_tolerance_samples,
         magnitude_tolerance_samples=magnitude_tolerance_samples,
+        localized_boundary_tolerance_samples=localized_boundary_tolerance_samples,
     )
     observed = {int(index) for index in observed_slave_indices}
     if any(index not in expected_slaves for index in observed):
@@ -268,6 +298,7 @@ def attribute_targeted_events(
                 canonical_sample=sample,
                 cluster=cluster,
                 reason="two-device relative evidence cannot attribute a device-local transition",
+                localized_boundary_tolerance_samples=localized_boundary_tolerance_samples,
             ))
             continue
         if observed != expected_slaves:
@@ -275,6 +306,7 @@ def attribute_targeted_events(
                 canonical_sample=sample,
                 cluster=cluster,
                 reason="master/slave local coverage is incomplete",
+                localized_boundary_tolerance_samples=localized_boundary_tolerance_samples,
             ))
             continue
         if duplicate_slave:
@@ -282,6 +314,7 @@ def attribute_targeted_events(
                 canonical_sample=sample,
                 cluster=cluster,
                 reason="multiple pair changes for one slave at one candidate transition",
+                localized_boundary_tolerance_samples=localized_boundary_tolerance_samples,
             ))
             continue
 
@@ -313,6 +346,7 @@ def attribute_targeted_events(
                     device_indices=(change.slave_device_index,),
                     delta_samples=change.delta_samples,
                     evidence="single verified negative master/slave change; local relationships support slave loss",
+                    boundary_localized=change.boundary_localized,
                 ))
                 continue
             if (
@@ -327,12 +361,14 @@ def attribute_targeted_events(
                     device_indices=(change.slave_device_index,),
                     delta_samples=change.delta_samples,
                     evidence="positive single-device change confirmed by targeted slave/slave evidence",
+                    boundary_localized=change.boundary_localized,
                 ))
                 continue
             decisions.append(_unresolved(
                 canonical_sample=sample,
                 cluster=cluster,
                 reason="single-device transition lacks consistent targeted attribution evidence",
+                localized_boundary_tolerance_samples=localized_boundary_tolerance_samples,
             ))
             continue
 
@@ -346,6 +382,13 @@ def attribute_targeted_events(
             and all_positive
             and equal_magnitude
             and _stable_slave_graph(nearby, expected_slaves)
+            and (
+                not all(change.boundary_localized for change in cluster)
+                or _localized_boundaries_concordant(
+                    cluster,
+                    tolerance_samples=localized_boundary_tolerance_samples,
+                )
+            )
         ):
             representative = sorted(values)[(len(values) - 1) // 2]
             decisions.append(AttributionDecision(
@@ -354,12 +397,17 @@ def attribute_targeted_events(
                 device_indices=(master_device_index,),
                 delta_samples=representative,
                 evidence="common positive master/slave changes with stable targeted slave/slave graph",
+                boundary_localized=_localized_boundaries_concordant(
+                    cluster,
+                    tolerance_samples=localized_boundary_tolerance_samples,
+                ),
             ))
             continue
         decisions.append(_unresolved(
             canonical_sample=sample,
             cluster=cluster,
             reason="conflicting, unequal, or multi-device-ambiguous local transition",
+            localized_boundary_tolerance_samples=localized_boundary_tolerance_samples,
         ))
 
     return tuple(

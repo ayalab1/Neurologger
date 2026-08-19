@@ -150,16 +150,21 @@ def _matlab_device_orientation(
 
 
 def _quaternion_metrics(actual: np.ndarray, expected: np.ndarray) -> MatlabQuaternionMetrics:
-    actual_q = np.asarray(actual, dtype=np.float64)
-    expected_q = np.asarray(expected, dtype=np.float64)
+    actual_q = np.array(actual, dtype=np.float64, copy=True)
+    expected_q = np.array(expected, dtype=np.float64, copy=True)
     if actual_q.shape != expected_q.shape or actual_q.ndim != 2 or actual_q.shape[1] != 4:
         raise ValueError("MATLAB/Python quaternion shapes must match N-by-4")
     actual_q /= np.linalg.norm(actual_q, axis=1)[:, None]
     expected_q /= np.linalg.norm(expected_q, axis=1)[:, None]
-    # q and -q encode the same orientation.  abs(dot) gives the shortest
-    # relative quaternion angle without discontinuous sign alignment.
-    dots = np.clip(np.abs(np.sum(actual_q * expected_q, axis=1)), 0.0, 1.0)
-    angles = np.degrees(2.0 * np.arccos(dots))
+    # q and -q encode the same orientation, so align both inputs to the same
+    # hemisphere.  The difference/sum atan2 form stays well-conditioned near
+    # zero and returns exact zero for identical normalized floating-point
+    # vectors, unlike arccos(dot), which amplifies a one-ULP dot-product error.
+    dots = np.sum(actual_q * expected_q, axis=1)
+    aligned_expected = np.where(dots[:, None] < 0.0, -expected_q, expected_q)
+    difference_norm = np.linalg.norm(actual_q - aligned_expected, axis=1)
+    sum_norm = np.linalg.norm(actual_q + aligned_expected, axis=1)
+    angles = np.degrees(4.0 * np.arctan2(difference_norm, sum_norm))
     return MatlabQuaternionMetrics(
         rows=int(actual_q.shape[0]),
         max_angle_degrees=float(np.max(angles, initial=0.0)),

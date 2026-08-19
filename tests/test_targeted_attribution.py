@@ -29,13 +29,14 @@ class TargetedAttributionTest(unittest.TestCase):
 
     def test_slave_loss_uses_signed_arbitrary_step_and_local_consistency(self) -> None:
         decisions = self._attribute(
-            [VerifiedPairChange(2, 1_000, -317)],
+            [VerifiedPairChange(2, 1_000, -317, boundary_localized=True)],
             [SlaveSlaveEvidence(2, 3, 1_001, 317)],
         )
         self.assertEqual(len(decisions), 1)
         self.assertEqual(decisions[0].kind, "slave")
         self.assertEqual(decisions[0].device_indices, (2,))
         self.assertEqual(decisions[0].delta_samples, -317)
+        self.assertTrue(decisions[0].boundary_localized)
 
     def test_master_loss_requires_common_steps_and_stable_slave_pair(self) -> None:
         decisions = self._attribute(
@@ -46,6 +47,40 @@ class TargetedAttributionTest(unittest.TestCase):
         self.assertEqual(decisions[0].kind, "master")
         self.assertEqual(decisions[0].device_indices, (1,))
         self.assertEqual(decisions[0].delta_samples, 20_000)
+
+    def test_discordant_localized_boundaries_cannot_become_narrow_master_loss(self) -> None:
+        decisions = attribute_targeted_events(
+            [
+                VerifiedPairChange(2, 100_000, 4, boundary_localized=True),
+                VerifiedPairChange(3, 104_000, 4, boundary_localized=True),
+            ],
+            device_count=3,
+            master_device_index=1,
+            observed_slave_indices=(2, 3),
+            slave_slave_evidence=(SlaveSlaveEvidence(2, 3, 102_000, 0),),
+            event_tolerance_samples=5_000,
+            localized_boundary_tolerance_samples=100,
+        )
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0].kind, "unresolved")
+        self.assertFalse(decisions[0].boundary_localized)
+
+    def test_concordant_localized_boundaries_can_become_narrow_master_loss(self) -> None:
+        decisions = attribute_targeted_events(
+            [
+                VerifiedPairChange(2, 100_000, 4, boundary_localized=True),
+                VerifiedPairChange(3, 100_080, 4, boundary_localized=True),
+            ],
+            device_count=3,
+            master_device_index=1,
+            observed_slave_indices=(2, 3),
+            slave_slave_evidence=(SlaveSlaveEvidence(2, 3, 100_040, 0),),
+            event_tolerance_samples=5_000,
+            localized_boundary_tolerance_samples=100,
+        )
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0].kind, "master")
+        self.assertTrue(decisions[0].boundary_localized)
 
     def test_positive_single_device_requires_slave_slave_confirmation_for_extra_source(self) -> None:
         decisions = self._attribute(
