@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 import re
 import struct
 import sys
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -25,7 +27,12 @@ CODE_ROOT = REPO_ROOT / "Code"
 if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
-from wild_preprocess.pc_time import align_pc_time_file, read_ce_params_hint
+from wild_preprocess.analog import imu_capacity_issue
+from wild_preprocess.pc_time import (
+    align_pc_time_file,
+    read_ce_params_hint,
+    validate_recording_start_compatibility,
+)
 
 PC_TIME_SCRIPT = CODE_ROOT / "WILD_generate_pc_time.py"
 PYTHON_BACKEND_WORKER = CODE_ROOT / "wild_preprocess" / "worker.py"
@@ -70,10 +77,13 @@ def _python_worker_job(
     output_folder: Path,
     overwrite: bool,
 ) -> dict[str, Any]:
-    """Build the standard GUI job; synchronized IMU is not optional here."""
+    """Build a traceable GUI job and request IMU only when it is supportable."""
+
+    process_imu, _reason = _imu_job_decision(selected)
 
     return {
         "schema_version": 3,
+        "run_id": uuid.uuid4().hex,
         "device_folders": [str(rec.folder) for rec in selected],
         "probe_indices": [int(rec.probe_index) for rec in selected],
         "master_index": master_index,
@@ -83,8 +93,23 @@ def _python_worker_job(
         "sync_options": {"chunk_seconds": 5.0},
         "pc_time_options": {},
         "allow_folder_name_start_fallback": False,
-        "process_imu": True,
+        "process_imu": process_imu,
     }
+
+
+def _imu_job_decision(selected: list[RecordingInfo]) -> tuple[bool, str]:
+    if not selected:
+        return False, "no selected recordings"
+    if any(rec.n_channels != 64 for rec in selected):
+        return False, "requires the WILD 64-channel/16-lane raw analog layout"
+    durations = [rec.duration_sec for rec in selected]
+    if any(duration is None or duration <= 0 for duration in durations):
+        return False, "recording duration is unavailable"
+    canonical_rows = int(math.ceil(min(float(duration) for duration in durations) * 1_250.0)) + 1
+    issue = imu_capacity_issue(canonical_rows, len(selected))
+    if issue is not None:
+        return False, issue
+    return True, "supported"
 
 
 @dataclass
@@ -198,11 +223,17 @@ def _write_json_object_atomic(path: Path, payload: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
-def _published_python_run_summary(manifest: dict[str, Any] | None) -> tuple[bool, str]:
+def _published_python_run_summary(
+    manifest: dict[str, Any] | None,
+    *,
+    expected_run_id: str | None = None,
+) -> tuple[bool, str]:
     """Classify the Python manifest without mistaking published WARN for failure."""
 
     if not manifest:
         return False, "run manifest unavailable"
+    if expected_run_id is not None and manifest.get("run_id") != expected_run_id:
+        return False, "run manifest belongs to a different worker run"
     overall = str(manifest.get("overall_status", "")).upper()
     sync = str(manifest.get("sync_status", "")).upper()
     merge = str(manifest.get("merge_status", "")).upper()
@@ -489,6 +520,7 @@ def preflight_checks(recordings: list[RecordingInfo], basepath: Path | None = No
         by_device[rec.device_id] = by_device.get(rec.device_id, 0) + 1
     repeated = [device for device, count in by_device.items() if count > 1]
     checks.append(("OK" if not repeated else "FAIL", "one recording per device", ", ".join(repeated) or "unique"))
+    start_anchors: list[tuple[int, str | None]] = []
     for rec in selected:
         status = "OK"
         details: list[str] = []
@@ -511,14 +543,52 @@ def preflight_checks(recordings: list[RecordingInfo], basepath: Path | None = No
                 if start_hint.recording_start_ms is None or start_hint.recording_date is None:
                     status = "FAIL"
                     details.append("invalid/missing CE RTC date/time at bytes 332-355")
+                else:
+                    start_anchors.append(
+                        (start_hint.recording_start_ms, start_hint.recording_date)
+                    )
+        if rec.fs is None:
+            status = "FAIL"
+            details.append("invalid/missing CE ephys sample rate")
+        if rec.n_channels is None:
+            status = "FAIL"
+            details.append("invalid/missing CE channel count")
+        elif rec.n_channels % 4 != 0:
+            status = "FAIL"
+            details.append("CE channel count is not divisible by four")
         amp_bytes = _file_size(rec.amplifier_file)
         if amp_bytes is not None and rec.n_channels and amp_bytes % (2 * rec.n_channels) != 0:
             status = "FAIL"
             details.append("amplifier size not divisible by channels")
+        analog_bytes = _file_size(rec.analog_file)
+        if (
+            analog_bytes is not None
+            and rec.n_channels
+            and rec.n_channels % 4 == 0
+            and analog_bytes % (2 * (rec.n_channels // 4)) != 0
+        ):
+            status = "FAIL"
+            details.append("analog size not divisible by inferred channels")
         if rec.duration_sec is not None and rec.duration_sec < 10:
             status = "WARN" if status == "OK" else status
             details.append(f"short duration {rec.duration_sec:.1f}s")
         checks.append((status, f"{rec.device_id}/{rec.recording_name}", "; ".join(details) or "ready"))
+    if len(start_anchors) == len(selected) and len(start_anchors) >= 2:
+        try:
+            validate_recording_start_compatibility(start_anchors)
+        except ValueError as exc:
+            checks.append(("FAIL", "recording start compatibility", str(exc)))
+        else:
+            checks.append(("OK", "recording start compatibility", "within 30s using CE date/time"))
+    if selected:
+        process_imu, imu_reason = _imu_job_decision(selected)
+        checks.append(
+            (
+                "OK" if process_imu else "WARN",
+                "synchronized IMU",
+                "will be generated" if process_imu else f"not requested: {imu_reason}",
+            )
+        )
     invalid_time = [rec for rec in selected if not rec.time_dat_valid]
     if invalid_time:
         checks.append((
@@ -631,6 +701,7 @@ def main() -> int:
             self._pc_time_process: QProcess | None = None
             self._backend_process: QProcess | None = None
             self._backend_job_path: Path | None = None
+            self._backend_run_id: str | None = None
             self._pc_time_raw_path: Path | None = None
             self._pc_time_stdout = ""
             self._continue_after_pc_time = False
@@ -1190,6 +1261,7 @@ def main() -> int:
                 output_folder=self.basepath,
                 overwrite=self.overwrite_outputs.isChecked(),
             )
+            self._backend_run_id = str(job["run_id"])
             handle = tempfile.NamedTemporaryFile(
                 mode="w",
                 suffix=".json",
@@ -1225,6 +1297,8 @@ def main() -> int:
 
         def _backend_finished(self, return_code: int) -> None:
             is_matlab = SYNC_BACKEND == "matlab"
+            expected_run_id = None if is_matlab else self._backend_run_id
+            self._backend_run_id = None
             backend_label = "MATLAB" if is_matlab else "Python backend"
             self._append_log(f"{backend_label} finished with exit code {return_code}.")
             self._set_progress(
@@ -1255,9 +1329,23 @@ def main() -> int:
                 self._continue_after_pc_time = False
                 manifest_path = self.basepath / "wild_preprocess_run.json"
                 manifest = None
-                if manifest_path.is_file():
+                if return_code == 0 and manifest_path.is_file():
                     try:
-                        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                        loaded_manifest = json.loads(
+                            manifest_path.read_text(encoding="utf-8")
+                        )
+                        if not isinstance(loaded_manifest, dict):
+                            raise ValueError("run manifest root is not an object")
+                        manifest = loaded_manifest
+                    except (OSError, ValueError) as exc:
+                        self._append_log(f"Could not read Python run manifest: {exc}")
+                if return_code == 0:
+                    published, publication_detail = _published_python_run_summary(
+                        manifest,
+                        expected_run_id=expected_run_id,
+                    )
+                    if published:
+                        assert manifest is not None
                         self._append_log(
                             "Python manifest: "
                             f"{manifest.get('overall_status', 'unknown')} "
@@ -1267,11 +1355,6 @@ def main() -> int:
                             f"pc_time={manifest.get('pc_time_status', 'unknown')}, "
                             f"imu={manifest.get('imu_status', 'unknown')})."
                         )
-                    except (OSError, json.JSONDecodeError) as exc:
-                        self._append_log(f"Could not read Python run manifest: {exc}")
-                if return_code == 0:
-                    published, publication_detail = _published_python_run_summary(manifest)
-                    if published:
                         qc_text = (
                             "Published with warnings; review valid_samples.dat and inspection figure"
                             if "warnings" in publication_detail
@@ -1279,6 +1362,14 @@ def main() -> int:
                         )
                         for rec in self._selected_recordings_for_run():
                             rec.sync_qc = qc_text
+                    else:
+                        for rec in self._selected_recordings_for_run():
+                            rec.sync_qc = "Current run was not published"
+                        self._append_log(
+                            "Python backend exited successfully but the current run cannot be "
+                            f"verified as published: {publication_detail}."
+                        )
+                        return
                     if published and "warnings" in publication_detail:
                         self._append_log(
                             "Python run " + publication_detail + "; outputs remain available for review."

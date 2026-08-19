@@ -637,7 +637,7 @@ def infer_device_gaps(
     tolerance = max(0.0, options.gap_event_time_tolerance_seconds)
     clusters: list[list[tuple[float, SyncPairResult, RelativeOffsetStep]]] = []
     for event in events:
-        if not clusters or event[0] - clusters[-1][-1][0] > tolerance:
+        if not clusters or event[0] - clusters[-1][0][0] > tolerance:
             clusters.append([event])
         else:
             clusters[-1].append(event)

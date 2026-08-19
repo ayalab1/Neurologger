@@ -7,7 +7,7 @@ import tempfile
 from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 import numpy as np
 
@@ -652,6 +652,122 @@ def _validity_summary(path: Path, n_samples: int, device_count: int) -> dict[str
     }
 
 
+def rewrite_staged_ephys_from_segments(
+    amplifier_path: Path,
+    validity_path: Path,
+    recordings: list[Recording],
+    master_index: int,
+    pair_models: dict[int, SyncModel],
+    *,
+    common_start: int,
+    common_end: int,
+    chunk_seconds: float,
+    device_gaps: list[DeviceGap] | None = None,
+    classified_intervals: list[ClassifiedInterval] | None = None,
+    device_source_steps: list[DeviceSourceStep] | None = None,
+    device_terminal_support: list[DeviceTerminalSupport] | None = None,
+    device_sync_segments: list[DeviceSyncSegment] | None = None,
+    progress: ProgressCallback | None = None,
+) -> dict[str, object]:
+    """Render a corrected private-stage ephys generation once from raw input."""
+
+    models = _device_models(recordings, master_index, pair_models)
+    n_samples, _ = _write_interleaved_stream(
+        Path(amplifier_path),
+        recordings,
+        models,
+        master_index,
+        common_start,
+        common_end,
+        stream="ephys",
+        chunk_seconds=chunk_seconds,
+        overwrite=True,
+        progress=progress,
+        device_gaps=device_gaps,
+        validity_path=Path(validity_path),
+        classified_intervals=classified_intervals,
+        device_source_steps=device_source_steps,
+        device_terminal_support=device_terminal_support,
+        device_sync_segments=device_sync_segments,
+    )
+    return _validity_summary(Path(validity_path), n_samples, len(recordings))
+
+
+def write_alignment_quality(
+    validity_path: Path,
+    output_path: Path,
+    *,
+    n_samples: int,
+    device_count: int,
+    master_index: int,
+    canonical_start_sample: int,
+    warning_intervals: Sequence[dict[str, object]],
+) -> dict[str, object]:
+    """Write a strict alignment mask without deleting measured ephys values."""
+
+    validity_path = Path(validity_path)
+    output_path = Path(output_path)
+    expected = n_samples * device_count
+    if not 0 <= master_index < device_count:
+        raise ValueError("master index is outside the device range")
+    if not validity_path.is_file() or validity_path.stat().st_size != expected:
+        raise ValueError("validity input is missing or has an unexpected size")
+    validity_device_order = [master_index] + [
+        index for index in range(device_count) if index != master_index
+    ]
+    validity_column_by_device = {
+        device_index + 1: column
+        for column, device_index in enumerate(validity_device_order)
+    }
+    partial = atomic_output_path(output_path)
+    partial.unlink(missing_ok=True)
+    intervals_by_device: dict[int, list[tuple[int, int]]] = {
+        index: [] for index in range(1, device_count + 1)
+    }
+    for interval in warning_intervals:
+        start = max(
+            0,
+            int(interval["canonical_start_sample"]) - canonical_start_sample,
+        )
+        end = min(
+            n_samples,
+            int(interval["canonical_end_sample"]) - canonical_start_sample,
+        )
+        if end <= start:
+            continue
+        for device_index in interval["affected_device_indices"]:
+            device = int(device_index)
+            if device not in intervals_by_device:
+                raise ValueError("alignment warning uses an unknown device index")
+            intervals_by_device[device].append((start, end))
+    source = np.memmap(
+        validity_path,
+        dtype=np.uint8,
+        mode="r",
+        shape=(n_samples, device_count),
+    )
+    try:
+        with partial.open("wb") as stream:
+            for chunk_start in range(0, n_samples, 1_000_000):
+                chunk_end = min(n_samples, chunk_start + 1_000_000)
+                block = np.asarray(source[chunk_start:chunk_end], dtype=np.uint8).copy()
+                for device, intervals in intervals_by_device.items():
+                    for start, end in intervals:
+                        overlap_start = max(chunk_start, start)
+                        overlap_end = min(chunk_end, end)
+                        if overlap_end > overlap_start:
+                            block[
+                                overlap_start - chunk_start : overlap_end - chunk_start,
+                                validity_column_by_device[device],
+                            ] = 0
+                block.tofile(stream)
+        replace_atomic(partial, output_path)
+    finally:
+        close_memmap(source)
+        partial.unlink(missing_ok=True)
+    return _validity_summary(output_path, n_samples, device_count)
+
+
 def apply_staged_zero_fill(
     amplifier_path: Path,
     validity_path: Path,
@@ -923,6 +1039,38 @@ def _recover_interrupted_transactions(output_folder: Path) -> None:
                     destination.unlink()
                 os.replace(backup_path, destination)
         shutil.rmtree(backup, ignore_errors=True)
+
+
+def _validate_core_staged_sizes(
+    staging: Path,
+    staged_outputs: dict[str, str],
+    recordings: list[Recording],
+) -> None:
+    """Reject a staged core stream whose byte length contradicts merge metadata."""
+
+    internal_path = Path(staged_outputs["_merge_internal"])
+    merge_info = json.loads(internal_path.read_text(encoding="utf-8"))
+    n_samples = int(merge_info["n_samples"])
+    analog_samples = int(merge_info["analog_samples"])
+    expected = {
+        "amplifier.dat": n_samples * int(merge_info["n_channels"]) * 2,
+        "analogin.dat": analog_samples * int(merge_info["analog_channels"]) * 2,
+        "time.dat": n_samples * 4,
+        "valid_samples.dat": n_samples * len(recordings),
+    }
+    if (staging / "valid_analog_samples.dat").is_file():
+        expected["valid_analog_samples.dat"] = analog_samples * len(recordings)
+    mismatches = {
+        name: (size, (staging / name).stat().st_size if (staging / name).is_file() else None)
+        for name, size in expected.items()
+        if not (staging / name).is_file() or (staging / name).stat().st_size != size
+    }
+    if mismatches:
+        details = ", ".join(
+            f"{name}: expected {size}, actual {actual}"
+            for name, (size, actual) in sorted(mismatches.items())
+        )
+        raise RuntimeError(f"Staged merge byte-length validation failed: {details}")
 
 
 def _merge_recordings_into_folder(
@@ -1284,8 +1432,10 @@ def _merge_recordings_into_folder(
                 "block": block,
                 "device_index": device_index + 1,
                 "device_name": recordings[device_index].device_name,
-                "channel_start_zero_based": block * 16,
-                "channel_count": 16,
+                "channel_start_zero_based": sum(
+                    item.analog_channels for item in recordings[:device_index]
+                ),
+                "channel_count": recordings[device_index].analog_channels,
             }
             for block, device_index in enumerate(range(len(recordings)))
         ],
@@ -1476,6 +1626,8 @@ def merge_recordings(
     backup = Path(tempfile.mkdtemp(prefix=".wild_merge_backup_", dir=output_folder))
     promoted: list[Path] = []
     backed_up: list[tuple[Path, Path]] = []
+    transaction_committed = False
+    rollback_complete = False
     try:
         staged_outputs = _merge_recordings_into_folder(
             recordings,
@@ -1504,6 +1656,7 @@ def merge_recordings(
         )
         if stage_callback is not None:
             stage_callback(staging, staged_outputs)
+        _validate_core_staged_sizes(staging, staged_outputs, recordings)
         internal_names = {
             Path(value).name for key, value in staged_outputs.items() if key.startswith("_")
         }
@@ -1531,24 +1684,39 @@ def merge_recordings(
                 backup_path = backup / name
                 os.replace(destination, backup_path)
                 backed_up.append((destination, backup_path))
-        for name, staged_path in staged_files.items():
+        promotion_names = sorted(
+            name for name in staged_files if name != "wild_preprocess_run.json"
+        )
+        if "wild_preprocess_run.json" in staged_files:
+            promotion_names.append("wild_preprocess_run.json")
+        for name in promotion_names:
+            staged_path = staged_files[name]
             destination = output_folder / name
             os.replace(staged_path, destination)
             promoted.append(destination)
         (backup / "COMMITTED").write_text("complete\n", encoding="utf-8")
+        transaction_committed = True
         return {
             key: str(output_folder / Path(value).name)
             for key, value in staged_outputs.items()
             if not key.startswith("_")
         }
     except BaseException:
-        for destination in promoted:
-            if destination.exists():
-                destination.unlink()
-        for destination, backup_path in reversed(backed_up):
-            if backup_path.exists():
-                os.replace(backup_path, destination)
+        try:
+            for destination in promoted:
+                if destination.exists():
+                    destination.unlink()
+            for destination, backup_path in reversed(backed_up):
+                if backup_path.exists():
+                    os.replace(backup_path, destination)
+        except BaseException as rollback_error:
+            raise RuntimeError(
+                "Merge publication rollback was incomplete; recovery backup was preserved at "
+                f"{backup}"
+            ) from rollback_error
+        rollback_complete = True
         raise
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-        shutil.rmtree(backup, ignore_errors=True)
+        if transaction_committed or rollback_complete:
+            shutil.rmtree(backup, ignore_errors=True)

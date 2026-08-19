@@ -195,11 +195,17 @@ def validate_pc_time_interval(
         or model.slope <= 0.0
     ):
         publication_blockers.append("PC-clock affine model is non-finite or non-increasing")
-    if step:
-        publication_blockers.append("persistent PC-clock residual step detected")
-    if rate_trigger_count > 1:
+    if coverage < options.min_coverage_fraction:
         publication_blockers.append(
-            f"PC-clock rate-regime change reproduced at {rate_trigger_count} tested boundaries"
+            f"anchor coverage {coverage:.3f} is insufficient for publication"
+        )
+    if leading > options.max_leading_extrapolation_sec:
+        publication_blockers.append(
+            f"leading extrapolation {leading:.3f}s is unsafe for publication"
+        )
+    if trailing > options.max_trailing_extrapolation_sec:
+        publication_blockers.append(
+            f"trailing extrapolation {trailing:.3f}s is unsafe for publication"
         )
     return PcTimeValidation(
         status="OK" if not failures else "WARN",

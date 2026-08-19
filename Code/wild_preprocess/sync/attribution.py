@@ -120,7 +120,7 @@ def _cluster_changes(
     for change in ordered:
         if (
             not clusters
-            or change.canonical_sample - clusters[-1][-1].canonical_sample > event_tolerance_samples
+            or change.canonical_sample - clusters[-1][0].canonical_sample > event_tolerance_samples
         ):
             clusters.append([change])
         else:
@@ -301,7 +301,12 @@ def attribute_targeted_events(
                 _relation_delta_for_device(item, change.slave_device_index) == change.delta_samples
                 for item in related
             )
-            if change.delta_samples < 0 and not unrelated_nonzero and consistent:
+            if (
+                change.delta_samples < 0
+                and related
+                and not unrelated_nonzero
+                and consistent
+            ):
                 decisions.append(AttributionDecision(
                     kind="slave",
                     canonical_sample=sample,

@@ -17,6 +17,7 @@ from .decode import (
     infer_recording_start_from_name,
     read_ce_params_hint,
     resolve_recording_start_ms,
+    validate_recording_start_compatibility,
 )
 from .infer import PcTimeModel, fit_robust_pc_time_model
 from .validate import PcTimeOptions, PcTimeValidation, validate_pc_time_interval
@@ -68,6 +69,7 @@ __all__ = [
     "map_raw_master_indices_to_canonical",
     "read_ce_params_hint",
     "resolve_recording_start_ms",
+    "validate_recording_start_compatibility",
     "validate_pc_time_interval",
     "validate_canonical_pc_time_interval",
     "unwrap_daily_ms",

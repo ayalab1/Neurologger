@@ -68,6 +68,17 @@ class SyncOptions:
     coarse_feature_rate_hz: float = 1_000.0
     coarse_reacquisition_max_lag_seconds: float = 30.0
     coarse_reacquisition_growth_factor: float = 2.0
+    # Post-merge lag is a correction/QC target.  It must not directly erase a
+    # complete fitted segment.  These options are appended for positional API
+    # compatibility with earlier SyncOptions construction.
+    postmerge_max_residual_lag_samples: int = 4
+    postmerge_dense_step_seconds: float = 30.0
+    postmerge_min_correction_windows: int = 3
+    postmerge_lag_consistency_samples: float = 2.0
+    # Offset steps are already refined at full sample rate.  Keep a bounded
+    # local guard around an unattributed boundary instead of invalidating the
+    # complete overlapping 10 s correlation-window envelope on every device.
+    unresolved_boundary_guard_samples: int = 100
 
 
 @dataclass

@@ -6,7 +6,7 @@ import tempfile
 from typing import Callable
 
 import numpy as np
-from scipy.signal import correlate, correlation_lags, find_peaks
+from scipy.signal import correlate, correlation_lags
 
 from ..binary_io import close_memmap
 from ..models import Recording, SyncObservation, SyncOptions
@@ -81,8 +81,11 @@ def _select_lag(
     lag_samples = int(-lags[primary_index])
 
     distance = max(1, int(peak_exclusion_samples))
-    peak_indices, _ = find_peaks(correlations, distance=distance)
-    candidates = [int(index) for index in peak_indices if abs(index - primary_index) >= distance]
+    candidates = [
+        int(index)
+        for index in range(correlations.size)
+        if abs(index - primary_index) >= distance
+    ]
     if candidates:
         secondary_index = max(candidates, key=lambda index: correlations[index])
         secondary = float(correlations[secondary_index])
@@ -347,10 +350,9 @@ def _coarse_reacquire(
                         full_offset = candidate_offset + refinement.lag_samples
                         if abs(full_offset - predicted_offset_samples) > ceiling_full:
                             refinement_reasons.append("full-rate refinement exceeds configured ceiling")
-                        # Full-rate confirmation must be at least as coherent
-                        # as the selected coarse peak.  This is a consistency
-                        # check between two measurements, not a relaxed
-                        # numerical acceptance threshold.
+                        # A low-bandwidth coarse candidate is only a search
+                        # proposal. Require the full-rate confirmation to be
+                        # at least as coherent before accepting that mapping.
                         if refinement.peak_correlation + 1e-12 < estimate.peak_correlation:
                             refinement_reasons.append("full-rate refinement does not confirm coarse peak")
                         if not refinement_reasons:
@@ -612,7 +614,7 @@ def observe_pair(
                 peak_to_background = estimate.peak_to_background
                 peak_margin = estimate.peak_margin_fraction
                 secondary = (
-                    observed_offset + estimate.secondary_lag_samples
+                    predicted + estimate.secondary_lag_samples
                     if estimate.secondary_lag_samples is not None
                     else None
                 )

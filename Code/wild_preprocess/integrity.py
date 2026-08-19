@@ -375,6 +375,7 @@ def unresolved_boundaries_from_offset_clusters(
     fallback_step_seconds: float,
     event_time_tolerance_seconds: float,
     gap_level_tolerance_samples: float,
+    boundary_guard_samples: int | None = None,
     canonicalize_master_sample: Canonicalize | None = None,
 ) -> tuple[UnresolvedBoundary, ...]:
     """Make local, structured exclusions for non-attributable offset clusters.
@@ -403,13 +404,18 @@ def unresolved_boundaries_from_offset_clusters(
         raw_starts: list[int] = []
         raw_ends: list[int] = []
         for pair, step in cluster:
-            start, end = _boundary_window_samples(
-                pair,
-                step,
-                fs=fs,
-                window_seconds=window_seconds,
-                fallback_step_seconds=fallback_step_seconds,
-            )
+            if boundary_guard_samples is None:
+                start, end = _boundary_window_samples(
+                    pair,
+                    step,
+                    fs=fs,
+                    window_seconds=window_seconds,
+                    fallback_step_seconds=fallback_step_seconds,
+                )
+            else:
+                guard = max(1, int(boundary_guard_samples))
+                start = max(0, int(step.master_sample) - guard)
+                end = int(step.master_sample) + guard + 1
             raw_starts.append(start)
             raw_ends.append(end)
         canonical_start = int(canonicalize(min(raw_starts)))
@@ -426,8 +432,13 @@ def unresolved_boundaries_from_offset_clusters(
                 canonical_end_sample=canonical_end,
                 pair_slave_indices=tuple(sorted({pair.slave_index for pair, _ in cluster})),
                 evidence=(
-                    "non-attributable persistent offset cluster; local interval spans "
-                    f"the supporting correlation windows ({description})"
+                    "non-attributable persistent offset cluster; local interval uses "
+                    + (
+                        "the supporting correlation windows"
+                        if boundary_guard_samples is None
+                        else f"a ±{max(1, int(boundary_guard_samples))}-sample refined-boundary guard"
+                    )
+                    + f" ({description})"
                 ),
             )
         )

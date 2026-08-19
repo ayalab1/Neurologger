@@ -32,6 +32,7 @@ def anchors_from_accepted_observations(
     for observation in sorted(observations, key=lambda item: item.center_time_sec):
         qualified = (
             observation.accepted
+            and observation.model_inlier
             and not observation.search_mode.startswith("coarse")
             and np.isfinite(observation.observed_offset_samples)
             and observation.peak_correlation >= options.min_peak_correlation

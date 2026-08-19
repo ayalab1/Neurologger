@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import struct
 from dataclasses import asdict, dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Sequence, overload
 
@@ -120,6 +120,8 @@ def _decode_ce_params_recording_start(data: bytes) -> tuple[int, str] | None:
     sub_seconds, second_fraction, _daylight_saving, _store_operation = struct.unpack_from(
         "<IIII", data, CE_PARAMS_TIME_OFFSET + 4
     )
+    if year > 99:
+        return None
     try:
         recording_date = date(2000 + year, month, day)
     except ValueError:
@@ -186,6 +188,62 @@ def resolve_recording_start_ms(
         "No absolute recording-start anchor in CE_params.bin or the explicit worker job; "
         "recording-folder fallback is disabled."
     )
+
+
+def validate_recording_start_compatibility(
+    anchors: Sequence[tuple[int, str | None]],
+    *,
+    maximum_difference_ms: int = 30_000,
+) -> None:
+    """Require selected recording starts to describe one acquisition session.
+
+    Full CE dates are authoritative when every anchor has one. Legacy anchors
+    without dates retain the prior circular time-of-day comparison so an
+    explicit folder-name recovery remains possible.
+    """
+
+    if maximum_difference_ms < 0:
+        raise ValueError("maximum_difference_ms must be non-negative")
+    normalized: list[tuple[int, str | None]] = []
+    for start_ms, recording_date in anchors:
+        value = int(start_ms)
+        if not 0 <= value < DAY_MS:
+            raise ValueError("recording start anchor is outside one day")
+        normalized.append((value, recording_date))
+    if len(normalized) < 2:
+        return
+    if all(recording_date is not None for _, recording_date in normalized):
+        absolute: list[datetime] = []
+        for start_ms, recording_date in normalized:
+            try:
+                day = date.fromisoformat(str(recording_date))
+            except ValueError as exc:
+                raise ValueError(f"invalid recording date {recording_date!r}") from exc
+            absolute.append(
+                datetime.combine(day, datetime.min.time())
+                + timedelta(milliseconds=start_ms)
+            )
+        for left in range(len(absolute)):
+            for right in range(left + 1, len(absolute)):
+                difference = abs((absolute[right] - absolute[left]).total_seconds() * 1000.0)
+                if difference > maximum_difference_ms:
+                    raise ValueError(
+                        f"selected recording starts differ by {difference / 1000:.3f}s "
+                        f"(devices {left + 1} and {right + 1}; limit "
+                        f"{maximum_difference_ms / 1000:g}s)"
+                    )
+        return
+    for left in range(len(normalized)):
+        for right in range(left + 1, len(normalized)):
+            first = normalized[left][0]
+            second = normalized[right][0]
+            difference = abs((second - first + DAY_MS // 2) % DAY_MS - DAY_MS // 2)
+            if difference > maximum_difference_ms:
+                raise ValueError(
+                    f"selected recording starts differ by {difference / 1000:.3f}s "
+                    f"(devices {left + 1} and {right + 1}; limit "
+                    f"{maximum_difference_ms / 1000:g}s)"
+                )
 
 
 def _packed_updates_from_words(
@@ -284,11 +342,14 @@ def _collect_packed_update_rows_streaming(
     candidate_count = 0
     accepted_count = 0
     rejected_count = 0
+    # A validity gap does not create a new packed-clock update. Keep the last
+    # accepted word across support-run boundaries so a value held on both
+    # sides is emitted once at its original transition, not once per fragment.
+    previous_accepted_value: int | None = None
     for start, end in runs:
         run_value: int | None = None
         run_start = start
         run_length = 0
-        previous_accepted_value: int | None = None
 
         def finish_run() -> None:
             nonlocal candidate_count, accepted_count, previous_accepted_value, rejected_count

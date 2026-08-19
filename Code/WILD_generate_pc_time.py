@@ -222,6 +222,8 @@ def decode_ce_params_recording_start_ms(data: bytes) -> int | None:
         CE_PARAMS_TIME_OFFSET + 4,
     )
 
+    if year > 99:
+        return None
     try:
         date(2000 + year, month, day)
     except ValueError:
@@ -1217,33 +1219,33 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    record_dir, analog_path, output_path = resolve_input_paths(args.input, args.output)
-    layout = build_layout(args)
-    hints = read_ce_params_hint(record_dir)
-    sample_rate_hz = resolve_sample_rate(args.sample_rate, args.base_fs, layout, hints)
-
-    if args.recording_start is not None:
-        recording_start_ms = args.recording_start
-        recording_start_source = "--recording-start"
-    elif hints.recording_start_ms is not None:
-        recording_start_ms = hints.recording_start_ms
-        recording_start_source = "CE_params.bin"
-    elif args.allow_folder_name_start_fallback:
-        inferred_start = infer_recording_start_from_name(record_dir)
-        if inferred_start is None:
-            raise ValueError(
-                "recording start time not found in CE_params.bin or the recording folder name; "
-                "pass --recording-start for an explicit reference"
-            )
-        recording_start_source = "folder name (explicit fallback)"
-        recording_start_ms = inferred_start
-    else:
-        raise ValueError(
-            "recording start time not found in CE_params.bin; pass --recording-start, or explicitly "
-            "enable --allow-folder-name-start-fallback for legacy recovery"
-        )
-
     try:
+        record_dir, analog_path, output_path = resolve_input_paths(args.input, args.output)
+        layout = build_layout(args)
+        hints = read_ce_params_hint(record_dir)
+        sample_rate_hz = resolve_sample_rate(args.sample_rate, args.base_fs, layout, hints)
+
+        if args.recording_start is not None:
+            recording_start_ms = args.recording_start
+            recording_start_source = "--recording-start"
+        elif hints.recording_start_ms is not None:
+            recording_start_ms = hints.recording_start_ms
+            recording_start_source = "CE_params.bin"
+        elif args.allow_folder_name_start_fallback:
+            inferred_start = infer_recording_start_from_name(record_dir)
+            if inferred_start is None:
+                raise ValueError(
+                    "recording start time not found in CE_params.bin or the recording folder name; "
+                    "pass --recording-start for an explicit reference"
+                )
+            recording_start_source = "folder name (explicit fallback)"
+            recording_start_ms = inferred_start
+        else:
+            raise ValueError(
+                "recording start time not found in CE_params.bin; pass --recording-start, or explicitly "
+                "enable --allow-folder-name-start-fallback for legacy recovery"
+            )
+
         summary_plot_path = resolve_summary_plot_path(record_dir, args.summary_plot)
         summary = generate_pc_time(
             analog_path=analog_path,

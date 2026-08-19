@@ -23,6 +23,7 @@ from .analog import (
     IMU_MODALITY_INVALID_KINDS,
     build_event_driven_analog_segments,
     build_imu_from_merged,
+    imu_capacity_issue,
     project_raw_imu_intervals_to_canonical,
     scan_analog_integrity,
     write_synchronized_imu_mat,
@@ -66,7 +67,12 @@ from .sync.infer import (
     fit_affine_sync_model,
     fit_independent_device_segments,
 )
-from .sync.merge import apply_staged_zero_fill, merge_recordings
+from .sync.merge import (
+    _recover_interrupted_transactions,
+    merge_recordings,
+    rewrite_staged_ephys_from_segments,
+    write_alignment_quality,
+)
 from .sync.observe import observe_pair
 from .sync.observe import estimate_lag, _tracking_rejection_reasons
 from .sync.attribution import (
@@ -76,7 +82,9 @@ from .sync.attribution import (
 )
 from .sync.postmerge import (
     PostMergeValidationResult,
-    postmerge_exclusion_intervals,
+    apply_postmerge_segment_corrections,
+    infer_postmerge_segment_corrections,
+    postmerge_alignment_warning_intervals,
     validate_segment_staged_merge,
 )
 from .sync.validate import validate_pair
@@ -90,11 +98,29 @@ from .pc_time import (
     fit_gap_aware_pc_time_model,
     pc_time_qc_payload,
     resolve_recording_start_ms,
+    validate_recording_start_compatibility,
     validate_canonical_pc_time_interval,
     write_canonical_interval_pc_time,
     write_pc_time_summary_png,
     write_pc_time_warning_png,
 )
+
+
+def _unlocalized_adaptive_half_window_samples(
+    options: SyncOptions, sample_rate_hz: float
+) -> int:
+    """Cover the widest accepted-center bracket around an adaptive midpoint."""
+
+    if sample_rate_hz <= 0 or options.step_seconds <= 0:
+        raise ValueError("sample rate and synchronization step must be positive")
+    return max(
+        1,
+        int(options.unresolved_boundary_guard_samples),
+        # The detector permits accepted centers separated by up to two normal
+        # steps when one observation is rejected. Their midpoint therefore
+        # has up to one full step of timing uncertainty on either side.
+        int(np.ceil(options.step_seconds * sample_rate_hz)),
+    )
 
 
 ProgressCallback = Callable[[str, float], None]
@@ -611,16 +637,17 @@ def _validate_selected_inputs(
             if not 0 <= value < 86_400_000:
                 raise ValueError(f"recording start anchor {index} is outside one day")
             values.append(value)
-        for left in range(len(values)):
-            for right in range(left + 1, len(values)):
-                circular_difference = abs(
-                    (values[right] - values[left] + 43_200_000) % 86_400_000 - 43_200_000
+        validate_recording_start_compatibility(
+            [
+                (
+                    value,
+                    str(anchor.get("recording_date"))
+                    if anchor.get("recording_date") is not None
+                    else None,
                 )
-                if circular_difference > 30_000:
-                    raise ValueError(
-                        f"Selected recording start anchors differ by {circular_difference / 1000:.3f}s "
-                        f"(devices {left + 1} and {right + 1}; limit 30s)."
-                    )
+                for value, anchor in zip(values, recording_start_anchors)
+            ]
+        )
     return probes
 
 
@@ -678,6 +705,7 @@ def run_multidevice_sync(
     integrity_duplication_scan: bool = False,
     write_event_files: bool = False,
     process_imu: bool = False,
+    run_id: str | None = None,
 ) -> PipelineResult:
     """Estimate multi-device timing and optionally write merged streams.
 
@@ -710,11 +738,29 @@ def run_multidevice_sync(
         progress("inspect_inputs", 100.0)
     if master_index < 0 or master_index >= len(recordings):
         raise ValueError(f"master_index {master_index} is outside {len(recordings)} recordings")
+    validated_master_anchor: tuple[int, str] | None = None
+    if recording_start_anchors is not None:
+        master_anchor = recording_start_anchors[master_index]
+        master_anchor_ms = int(master_anchor["milliseconds_since_midnight"])
+        if recording_start_ms is not None and int(recording_start_ms) != master_anchor_ms:
+            raise ValueError(
+                "recording_start_ms disagrees with the validated master recording_start_anchors value"
+            )
+        validated_master_anchor = (
+            master_anchor_ms,
+            str(master_anchor.get("source") or "validated recording start anchor"),
+        )
     output_folder = Path(output_folder).resolve()
     if any(output_folder == recording.folder for recording in recordings):
         raise ValueError("The merged output folder must not be one of the raw recording folders.")
     output_folder.mkdir(parents=True, exist_ok=True)
-    run_id = uuid.uuid4().hex
+    _recover_interrupted_transactions(output_folder)
+    if run_id is None:
+        run_id = uuid.uuid4().hex
+    elif not isinstance(run_id, str) or not run_id.strip():
+        raise ValueError("run_id must be a non-empty string")
+    else:
+        run_id = run_id.strip()
     attempt_folder = output_folder / f".wild_sync_attempt_{run_id}"
     protected_outputs = [output_folder / "wild_preprocess_run.json"]
     if merge:
@@ -1129,6 +1175,7 @@ def run_multidevice_sync(
             with performance.measure("pair_figure_generation"):
                 save_pair_figure(pair, observed, figure_path)
             pairs.append(pair)
+            del observed_by_slave[slave_index]
             if progress is not None:
                 progress(
                     "refine_sync",
@@ -1181,7 +1228,14 @@ def run_multidevice_sync(
                         gap.device_index == change.slave_device_index
                         or gap.device_index == master_index + 1
                     )
-                    and abs(gap.canonical_start_sample - change.canonical_sample)
+                    and abs(
+                        gap.canonical_start_sample
+                        - canonicalize_master_sample(
+                            change.canonical_sample,
+                            device_gaps,
+                            master_device_index=master_index + 1,
+                        )
+                    )
                     <= explained_radius
                     for gap in device_gaps
                 )
@@ -1216,11 +1270,10 @@ def run_multidevice_sync(
                     continue
                 device_index = decision.device_indices[0]
                 size = abs(decision.delta_samples)
-                decision_canonical_sample = decision.canonical_sample + sum(
-                    gap.missing_samples
-                    for gap in device_gaps
-                    if gap.device_index == master_index + 1
-                    and gap.canonical_start_sample <= decision.canonical_sample
+                decision_canonical_sample = canonicalize_master_sample(
+                    decision.canonical_sample,
+                    device_gaps,
+                    master_device_index=master_index + 1,
                 )
                 if any(
                     gap.device_index == device_index
@@ -1259,6 +1312,7 @@ def run_multidevice_sync(
             fallback_step_seconds=options.step_seconds,
             event_time_tolerance_seconds=options.gap_event_time_tolerance_seconds,
             gap_level_tolerance_samples=options.gap_level_tolerance_samples,
+            boundary_guard_samples=options.unresolved_boundary_guard_samples,
             canonicalize_master_sample=canonicalize,
         )
     )
@@ -1272,21 +1326,26 @@ def run_multidevice_sync(
         for start, end, slave_index, evidence in isolated_boundary_candidates
         if canonicalize(end) > canonicalize(start)
     )
-    adaptive_half_window = max(1, int(round(options.window_seconds * master.fs / 2.0)))
+    # Adaptive changes are located only between adjacent observation centers,
+    # unlike persistent offset steps refined against raw samples. Preserve the
+    # full half-cadence timing uncertainty until a sample-wise boundary exists.
+    adaptive_half_window = _unlocalized_adaptive_half_window_samples(
+        options, master.fs
+    )
     unresolved_boundaries.extend(
         UnresolvedBoundary(
             canonical_start_sample=canonicalize(
                 max(0, decision.canonical_sample - adaptive_half_window)
             ),
             canonical_end_sample=canonicalize(
-                decision.canonical_sample + adaptive_half_window
+                decision.canonical_sample + adaptive_half_window + 1
             ),
             pair_slave_indices=decision.device_indices,
             evidence=decision.evidence,
         )
         for decision in targeted_decisions
         if decision.kind == "unresolved"
-        and canonicalize(decision.canonical_sample + adaptive_half_window)
+        and canonicalize(decision.canonical_sample + adaptive_half_window + 1)
         > canonicalize(max(0, decision.canonical_sample - adaptive_half_window))
     )
     unresolved_boundaries.sort(
@@ -1636,6 +1695,8 @@ def run_multidevice_sync(
         extra_managed_names.update({"pc_time.dat", "pc_time_fit_summary.png"})
     if process_imu:
         extra_managed_names.add("IMU.mat")
+    if validate_postmerge:
+        extra_managed_names.add("alignment_quality.dat")
     component = {
         "merge_status": "NOT_RUN",
         "analog_status": "NOT_RUN",
@@ -1702,9 +1763,12 @@ def run_multidevice_sync(
         ]
         postmerge = None
         correlation_postmerge = None
-        postmerge_exclusions = []
         postmerge_warning_messages: list[str] = []
         postmerge_exclusion_rounds = 0
+        proposed_postmerge_corrections = ()
+        applied_postmerge_corrections = ()
+        rejected_postmerge_corrections: tuple[str, ...] = ()
+        alignment_warning_intervals: tuple[dict[str, object], ...] = ()
         performance.begin("postmerge_validation")
         if progress is not None:
             progress("postmerge_qc", 0.0)
@@ -1722,9 +1786,14 @@ def run_multidevice_sync(
                     n_output_samples=int(merge_info["n_samples"]),
                     window_seconds=10.0,
                     max_lag_samples=options.tracking_max_lag_samples,
-                    max_allowed_abs_lag_samples=4,
+                    max_allowed_abs_lag_samples=(
+                        options.postmerge_max_residual_lag_samples
+                    ),
                     min_peak_correlation=options.min_peak_correlation,
+                    min_peak_to_background=options.min_peak_to_background,
+                    min_peak_margin_fraction=options.min_peak_margin_fraction,
                     peak_exclusion_samples=options.peak_exclusion_samples,
+                    dense_step_seconds=options.postmerge_dense_step_seconds,
                     structural_only=structural_only,
                 )
 
@@ -1732,89 +1801,80 @@ def run_multidevice_sync(
             correlation_postmerge = postmerge
             if postmerge.status == "WARN":
                 postmerge_warning_messages.append(postmerge.message)
-                proposed = list(
-                    postmerge_exclusion_intervals(
-                        postmerge,
-                        canonical_start_sample=int(merge_info["common_start_master_sample"]),
-                        device_count=len(recordings),
-                    )
+                proposed_postmerge_corrections = infer_postmerge_segment_corrections(
+                    postmerge,
+                    canonical_start_sample=int(
+                        merge_info["common_start_master_sample"]
+                    ),
+                    min_peak_to_background=options.min_peak_to_background,
+                    min_peak_margin_fraction=options.min_peak_margin_fraction,
+                    minimum_supporting_measurements=(
+                        options.postmerge_min_correction_windows
+                    ),
+                    maximum_lag_deviation_samples=(
+                        options.postmerge_lag_consistency_samples
+                    ),
                 )
-                if proposed:
-                    merge_info["validity_summary"] = apply_staged_zero_fill(
+                (
+                    corrected_segments,
+                    applied_postmerge_corrections,
+                    rejected_postmerge_corrections,
+                ) = apply_postmerge_segment_corrections(
+                    result.device_sync_segments,
+                    proposed_postmerge_corrections,
+                )
+                if applied_postmerge_corrections:
+                    result.device_sync_segments = list(corrected_segments)
+                    merge_info["device_sync_segments"] = [
+                        segment.to_dict() for segment in result.device_sync_segments
+                    ]
+                    merge_info["validity_summary"] = rewrite_staged_ephys_from_segments(
                         Path(staged_outputs["amplifier"]),
                         Path(staged_outputs["validity"]),
                         recordings,
                         master_index,
-                        canonical_start_sample=int(merge_info["common_start_master_sample"]),
-                        n_output_samples=int(merge_info["n_samples"]),
-                        intervals=proposed,
+                        pair_models,
+                        common_start=int(merge_info["common_start_master_sample"]),
+                        common_end=int(merge_info["common_end_master_sample"]),
+                        chunk_seconds=options.chunk_seconds,
+                        device_gaps=result.device_gaps,
+                        classified_intervals=result.classified_intervals,
+                        device_source_steps=result.device_source_steps,
+                        device_terminal_support=result.device_terminal_support,
+                        device_sync_segments=result.device_sync_segments,
+                        progress=progress,
                     )
-                    postmerge_exclusions.extend(proposed)
-                    postmerge_exclusion_rounds = 1
-                    result.classified_intervals = list(
-                        merge_compatible_intervals(
-                            [*result.classified_intervals, *proposed]
-                        )
-                    )
-                    merge_info["classified_intervals"] = [
-                        interval.to_dict() for interval in result.classified_intervals
-                    ]
-                    merge_info["classified_interval_summary"] = _classified_interval_summary(
-                        result.classified_intervals,
-                        canonical_start_sample=int(merge_info["common_start_master_sample"]),
-                        n_samples=int(merge_info["n_samples"]),
-                        device_count=len(recordings),
-                    )
-                    # The correction is bounded to one patch, but the patched
-                    # artifact must still pass the structural validity/zero
-                    # contract before publication.  A remaining local WARN is
-                    # publishable only when it has no further actionable
-                    # exclusion.  Otherwise some failed samples would remain
-                    # claimed valid after the single permitted correction.
-                    postmerge = validate_current_stage(structural_only=True)
-                    remaining_exclusions = postmerge_exclusion_intervals(
-                        postmerge,
-                        canonical_start_sample=int(merge_info["common_start_master_sample"]),
-                        device_count=len(recordings),
-                    )
-
-                    def covered_by_applied_exclusions(candidate) -> bool:
-                        for device_index in candidate.affected_device_indices:
-                            cursor = candidate.canonical_start_sample
-                            for applied in sorted(
-                                postmerge_exclusions,
-                                key=lambda interval: interval.canonical_start_sample,
-                            ):
-                                if device_index not in applied.affected_device_indices:
-                                    continue
-                                if applied.canonical_end_sample <= cursor:
-                                    continue
-                                if applied.canonical_start_sample > cursor:
-                                    break
-                                cursor = max(cursor, applied.canonical_end_sample)
-                                if cursor >= candidate.canonical_end_sample:
-                                    break
-                            if cursor < candidate.canonical_end_sample:
-                                return False
-                        return True
-
-                    uncovered_exclusions = tuple(
-                        interval
-                        for interval in remaining_exclusions
-                        if not covered_by_applied_exclusions(interval)
-                    )
-                    if uncovered_exclusions:
-                        postmerge = replace(
-                            postmerge,
-                            status="FAIL",
-                            message=(
-                                "the single bounded post-merge correction did not establish "
-                                "a valid published mapping; final validation still recommends "
-                                f"{len(uncovered_exclusions)} previously uncovered exclusion "
-                                f"interval(s): "
-                                f"{postmerge.message}"
-                            ),
-                        )
+                    postmerge = validate_current_stage()
+                    if postmerge.status == "WARN":
+                        postmerge_warning_messages.append(postmerge.message)
+            if postmerge is not None and postmerge.publishable:
+                alignment_warning_intervals = postmerge_alignment_warning_intervals(
+                    postmerge,
+                    canonical_start_sample=int(merge_info["common_start_master_sample"]),
+                )
+                alignment_summary = write_alignment_quality(
+                    Path(staged_outputs["validity"]),
+                    staging / "alignment_quality.dat",
+                    n_samples=int(merge_info["n_samples"]),
+                    device_count=len(recordings),
+                    master_index=master_index,
+                    canonical_start_sample=int(
+                        merge_info["common_start_master_sample"]
+                    ),
+                    warning_intervals=alignment_warning_intervals,
+                )
+                merge_info.update(
+                    {
+                        "alignment_quality_samples_file": "alignment_quality.dat",
+                        "alignment_quality_samples_dtype": "uint8",
+                        "alignment_quality_samples_layout": "sample_major_interleaved",
+                        "alignment_quality_samples_shape": [
+                            int(merge_info["n_samples"]),
+                            len(recordings),
+                        ],
+                        "alignment_quality_summary": alignment_summary,
+                    }
+                )
         performance.end("postmerge_validation")
         if progress is not None:
             progress("postmerge_qc", 100.0)
@@ -1824,15 +1884,36 @@ def run_multidevice_sync(
                 "message": "disabled for compatibility caller",
             }
         elif postmerge.publishable:
-            evidence_postmerge = correlation_postmerge or postmerge
-            serialized_postmerge = evidence_postmerge.to_dict()
+            serialized_postmerge = postmerge.to_dict()
             # Validation read the private staged file. On commit that same
             # artifact is moved byte-for-byte to this canonical destination.
             serialized_postmerge["amplifier_path"] = str(output_folder / "amplifier.dat")
-            serialized_postmerge["applied_exclusion_intervals"] = [
-                interval.to_dict() for interval in postmerge_exclusions
+            serialized_postmerge["applied_exclusion_intervals"] = []
+            serialized_postmerge["localized_exclusion_applied"] = False
+            serialized_postmerge["alignment_warning_intervals"] = list(
+                alignment_warning_intervals
+            )
+            serialized_postmerge["proposed_segment_corrections"] = [
+                correction.to_dict()
+                for correction in proposed_postmerge_corrections
             ]
-            serialized_postmerge["localized_exclusion_applied"] = bool(postmerge_exclusions)
+            serialized_postmerge["applied_segment_corrections"] = [
+                correction.to_dict()
+                for correction in applied_postmerge_corrections
+            ]
+            serialized_postmerge["rejected_segment_corrections"] = list(
+                rejected_postmerge_corrections
+            )
+            serialized_postmerge["correction_render_rounds"] = (
+                1 if applied_postmerge_corrections else 0
+            )
+            if (
+                correlation_postmerge is not None
+                and correlation_postmerge is not postmerge
+            ):
+                serialized_postmerge["initial_correlation_validation"] = (
+                    correlation_postmerge.to_dict()
+                )
         else:
             serialized_postmerge = postmerge.to_dict()
             if correlation_postmerge is not None and correlation_postmerge is not postmerge:
@@ -1845,21 +1926,22 @@ def run_multidevice_sync(
             serialized_postmerge["staged_artifact_retained"] = False
         if postmerge is not None:
             serialized_postmerge["localized_exclusion_rounds"] = postmerge_exclusion_rounds
-            serialized_postmerge["max_localized_exclusion_rounds"] = 1
+            serialized_postmerge["max_localized_exclusion_rounds"] = 0
             serialized_postmerge["initial_warning_messages"] = postmerge_warning_messages
             serialized_postmerge["final_revalidation_status"] = postmerge.status
             serialized_postmerge["final_revalidation_message"] = postmerge.message
-            if postmerge_exclusions and postmerge.publishable:
+            if applied_postmerge_corrections and postmerge.publishable:
                 serialized_postmerge["status"] = "WARN"
                 if postmerge.status == "OK":
                     serialized_postmerge["message"] = (
-                        f"localized post-merge exclusions were applied once and the patched "
-                        f"artifact revalidated successfully; {postmerge.message}"
+                        "repeated residual lag was corrected by one raw-source rerender "
+                        f"and the corrected artifact revalidated successfully; {postmerge.message}"
                     )
                 else:
                     serialized_postmerge["message"] = (
-                        f"localized post-merge exclusions were applied once; final "
-                        f"revalidation remains {postmerge.status}; {postmerge.message}"
+                        "supported residual lag corrections were applied by one raw-source "
+                        f"rerender; final validation remains {postmerge.status}; "
+                        f"{postmerge.message}"
                     )
         merge_info["postmerge_validation"] = serialized_postmerge
         if postmerge is not None and not postmerge.publishable:
@@ -1878,7 +1960,9 @@ def run_multidevice_sync(
 
         component["merge_status"] = (
             "WARN"
-            if postmerge_exclusions
+            if applied_postmerge_corrections
+            or alignment_warning_intervals
+            or (postmerge is not None and postmerge.status == "WARN")
             or result.status == "WARN"
             or merge_info.get("analog_status") == "WARN"
             else "OK"
@@ -1932,11 +2016,14 @@ def run_multidevice_sync(
                         valid_raw_runs=master_integrity.valid_raw_support_runs(),
                     )
                     packed_diagnostics = packed_updates.diagnostics
-                    anchor_ms, anchor_source = resolve_recording_start_ms(
-                        master.folder,
-                        explicit_recording_start_ms=recording_start_ms,
-                        allow_folder_name_fallback=allow_folder_name_start_fallback,
-                    )
+                    if validated_master_anchor is not None:
+                        anchor_ms, anchor_source = validated_master_anchor
+                    else:
+                        anchor_ms, anchor_source = resolve_recording_start_ms(
+                            master.folder,
+                            explicit_recording_start_ms=recording_start_ms,
+                            allow_folder_name_fallback=allow_folder_name_start_fallback,
+                        )
                     analog_pc_fit = fit_pc_time_through_analog_mapping(
                         packed_updates,
                         master_segments,
@@ -1966,11 +2053,14 @@ def run_multidevice_sync(
                         CE64_RAW_MISC_LAYOUT,
                         return_diagnostics=True,
                     )
-                    anchor_ms, anchor_source = resolve_recording_start_ms(
-                        master.folder,
-                        explicit_recording_start_ms=recording_start_ms,
-                        allow_folder_name_fallback=allow_folder_name_start_fallback,
-                    )
+                    if validated_master_anchor is not None:
+                        anchor_ms, anchor_source = validated_master_anchor
+                    else:
+                        anchor_ms, anchor_source = resolve_recording_start_ms(
+                            master.folder,
+                            explicit_recording_start_ms=recording_start_ms,
+                            allow_folder_name_fallback=allow_folder_name_start_fallback,
+                        )
                     legacy_pc_fit = fit_gap_aware_pc_time_model(
                         indices,
                         packed,
@@ -2028,6 +2118,11 @@ def run_multidevice_sync(
                         "analog_gap_policy": (
                             "neural gaps are not applied to analog/PC time without "
                             "independent analog-clock evidence"
+                        ),
+                        "publication_mode": (
+                            "robust_affine_best_effort_warn"
+                            if pc_validation.status == "WARN"
+                            else "robust_affine"
                         ),
                     }
                 )
@@ -2094,15 +2189,32 @@ def run_multidevice_sync(
             if progress is not None:
                 progress("pc_time", 100.0)
 
+        imu_generation_enabled = process_imu
         if process_imu:
+            imu_skip_reason = (
+                "synchronized IMU requires the WILD 16-channel raw analog layout"
+                if not analog_authority_enabled
+                else imu_capacity_issue(
+                    int(merge_info["analog_samples"]), len(recordings)
+                )
+            )
+            if imu_skip_reason is not None:
+                imu_generation_enabled = False
+                component["imu_status"] = "WARN"
+                imu_warning_message = imu_skip_reason
+                imu_metadata = {
+                    "status": "not_generated",
+                    "requested": True,
+                    "reason": imu_skip_reason,
+                }
+                if progress is not None:
+                    progress("imu", 100.0)
+
+        if imu_generation_enabled:
             performance.begin("imu_generation")
             if progress is not None:
                 progress("imu", 0.0)
             try:
-                if not analog_authority_enabled:
-                    raise ValueError(
-                        "synchronized IMU requires the WILD 16-channel raw analog layout"
-                    )
                 segment_sets: dict[int, tuple] = {}
                 timeline_hashes: dict[str, str] = {}
                 for device_index, (recording, integrity, prior) in enumerate(
@@ -2380,6 +2492,14 @@ def run_multidevice_sync(
             "valid_samples.dat": int(merge_info["n_samples"]) * len(recordings),
             **(
                 {
+                    "alignment_quality.dat": int(merge_info["n_samples"])
+                    * len(recordings)
+                }
+                if merge_info.get("alignment_quality_samples_file")
+                else {}
+            ),
+            **(
+                {
                     "valid_analog_samples.dat": int(merge_info["analog_samples"])
                     * len(recordings)
                 }
@@ -2394,19 +2514,39 @@ def run_multidevice_sync(
             for path in staging.iterdir()
             if path.is_file() and path.name != ".wild_internal_merge.json"
         }
+        size_mismatches = {
+            name: (expected, actual_output_bytes.get(name))
+            for name, expected in expected_output_bytes.items()
+            if actual_output_bytes.get(name) != expected
+        }
+        if size_mismatches:
+            details = ", ".join(
+                f"{name}: expected {expected}, actual {actual}"
+                for name, (expected, actual) in sorted(size_mismatches.items())
+            )
+            raise ValueError(f"staged output byte-length validation failed: {details}")
         performance.set_output_bytes(
             expected=expected_output_bytes,
             actual=actual_output_bytes,
         )
         warnings = _manifest_warnings(pairs)
-        if postmerge_exclusions:
+        if (
+            applied_postmerge_corrections
+            or alignment_warning_intervals
+            or (postmerge is not None and postmerge.status == "WARN")
+        ):
             warnings.append(
                 {
                     "component": "postmerge_validation",
                     "status": "WARN",
                     "message": serialized_postmerge["message"],
-                    "localized_exclusion_count": len(postmerge_exclusions),
-                    "localized_exclusion_rounds": postmerge_exclusion_rounds,
+                    "applied_segment_correction_count": len(
+                        applied_postmerge_corrections
+                    ),
+                    "alignment_warning_interval_count": len(
+                        alignment_warning_intervals
+                    ),
+                    "measured_data_preserved": True,
                 }
             )
         if component["pc_time_status"] == "WARN":
@@ -2548,10 +2688,11 @@ def run_multidevice_sync(
             progress("publish", 100.0)
         return result
     except _StagedMergeRejected as error:
+        prior_sync_status = result.outputs.get("sync_status", result.status)
         result.status = "FAIL"
         result.outputs.update(
             {
-                "sync_status": "OK",
+                "sync_status": prior_sync_status,
                 "merge_status": "FAIL",
                 "analog_status": "NOT_RUN",
                 "pc_time_status": "NOT_RUN",

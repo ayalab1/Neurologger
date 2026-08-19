@@ -119,6 +119,9 @@ def validate_pair(
         # system is not identifiable, even if later local windows appear
         # internally consistent, so it must prevent publication.
         failures.append(f"initial peak margin {initial.peak_margin_fraction:.3g}")
+    initial_search_half_width = int(np.max(np.abs(initial.lags))) if initial.lags.size else 0
+    if initial_search_half_width and abs(initial.lag_samples) >= max(1, initial_search_half_width - 1):
+        failures.append("initial correlation peak is at the search boundary")
     accepted_fraction = model.accepted_count / max(model.observation_count, 1)
     if accepted_fraction < options.min_accepted_fraction:
         failures.append(f"accepted windows {accepted_fraction:.1%}")

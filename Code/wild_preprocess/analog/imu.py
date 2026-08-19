@@ -753,6 +753,53 @@ def _production_output_grid(canonical_rows: int) -> tuple[np.ndarray, np.ndarray
     return canonical, np.arange(count, dtype=np.float64) / DEFAULT_IMU_SAMPLE_RATE_HZ
 
 
+def _estimated_imu_peak_bytes(
+    canonical_rows: int, output_count: int, device_count: int
+) -> int:
+    return int(
+        canonical_rows * 9 * np.dtype(np.float64).itemsize
+        + output_count * device_count * 64 * np.dtype(np.float64).itemsize
+    )
+
+
+def imu_capacity_issue(
+    canonical_rows: int,
+    device_count: int,
+    *,
+    max_output_samples: int = DEFAULT_MAX_OUTPUT_SAMPLES,
+    max_peak_bytes: int = DEFAULT_MAX_PEAK_BYTES,
+) -> str | None:
+    """Return the production IMU capacity rejection without allocating arrays."""
+
+    if canonical_rows <= 0 or device_count <= 0:
+        raise ValueError("canonical_rows and device_count must be positive")
+    if (
+        not isinstance(max_output_samples, int)
+        or not isinstance(max_peak_bytes, int)
+        or max_output_samples <= 0
+        or max_peak_bytes <= 0
+    ):
+        raise ValueError("IMU capacity limits must be positive")
+    output_count = int(
+        math.ceil(canonical_rows * IMU_RESAMPLE_UP / IMU_RESAMPLE_DOWN)
+    )
+    if output_count > max_output_samples:
+        return (
+            f"IMU result would contain {output_count} samples, above the explicit "
+            f"in-memory limit of {max_output_samples}"
+        )
+    estimated_peak_bytes = _estimated_imu_peak_bytes(
+        canonical_rows, output_count, device_count
+    )
+    if estimated_peak_bytes > max_peak_bytes:
+        return (
+            "MATLAB-compatible IMU estimated peak memory "
+            f"{estimated_peak_bytes} bytes exceeds explicit limit {max_peak_bytes}; "
+            "use a streaming implementation or a smaller recording"
+        )
+    return None
+
+
 def _gap_safe_resample_support(
     temporal_valid: np.ndarray,
     modality_mask: np.ndarray | None,
@@ -1003,27 +1050,18 @@ def build_imu_from_merged(
         range(1, len(normalized) + 1)
     ):
         raise ValueError("mapping_hashes_by_device must use exactly one-based recording ids")
-    grid, time_seconds = _production_output_grid(canonical_rows)
-    if grid.size > max_output_samples:
-        raise ValueError(
-            f"IMU result would contain {grid.size} samples, above the explicit in-memory "
-            f"limit of {max_output_samples}"
-        )
-    if not isinstance(max_peak_bytes, int) or max_peak_bytes <= 0:
-        raise ValueError("max_peak_bytes must be a positive integer")
-    # Conservative allocation guard.  One current device needs a float64
-    # N-by-9 source workspace; retained per-output device state includes raw,
-    # calibrated, quaternion, rotation, derived motion, coordinates, and masks.
-    estimated_peak_bytes = (
-        canonical_rows * 9 * np.dtype(np.float64).itemsize
-        + grid.size * len(normalized) * 64 * np.dtype(np.float64).itemsize
+    issue = imu_capacity_issue(
+        canonical_rows,
+        len(normalized),
+        max_output_samples=max_output_samples,
+        max_peak_bytes=max_peak_bytes,
     )
-    if estimated_peak_bytes > max_peak_bytes:
-        raise ValueError(
-            "MATLAB-compatible IMU estimated peak memory "
-            f"{estimated_peak_bytes} bytes exceeds explicit limit {max_peak_bytes}; "
-            "use a streaming implementation or a smaller recording"
-        )
+    if issue is not None:
+        raise ValueError(issue)
+    grid, time_seconds = _production_output_grid(canonical_rows)
+    estimated_peak_bytes = _estimated_imu_peak_bytes(
+        canonical_rows, grid.size, len(normalized)
+    )
     merged = np.memmap(
         merged_path,
         dtype="<i2",

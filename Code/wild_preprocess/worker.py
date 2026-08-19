@@ -10,12 +10,25 @@ if __package__ in {None, ""}:
 
 from wild_preprocess.models import SyncOptions
 from wild_preprocess.pipeline import run_multidevice_sync
-from wild_preprocess.pc_time import PcTimeOptions, read_ce_params_hint, resolve_recording_start_ms
+from wild_preprocess.pc_time import (
+    PcTimeOptions,
+    read_ce_params_hint,
+    resolve_recording_start_ms,
+    validate_recording_start_compatibility,
+)
 
 
 _LAST_PROGRESS_STAGE: str | None = None
 _LAST_PROGRESS_PERCENT = -1.0
 WORKER_JOB_SCHEMA_VERSION = 3
+_BOOLEAN_JOB_FIELDS = {
+    "allow_folder_name_start_fallback": False,
+    "overwrite": False,
+    "merge": True,
+    "integrity_duplication_scan": True,
+    "write_event_files": False,
+    "process_imu": False,
+}
 
 
 def _progress(stage: str, percent: float) -> None:
@@ -33,6 +46,13 @@ def _progress(stage: str, percent: float) -> None:
         return
     _LAST_PROGRESS_PERCENT = normalized
     print(f"WILD_PROGRESS:{stage}:{normalized:.3f}", flush=True)
+
+
+def _job_boolean(job: dict[str, object], field: str) -> bool:
+    value = job.get(field, _BOOLEAN_JOB_FIELDS[field])
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} must be a boolean")
+    return value
 
 
 def _validated_job(job: dict[str, object]) -> tuple[list[Path], list[int], list[dict[str, object]]]:
@@ -59,9 +79,13 @@ def _validated_job(job: dict[str, object]) -> tuple[list[Path], list[int], list[
     if master_index < 1 or master_index > len(folders):
         raise ValueError("worker job master_index is outside selected device_folders")
     explicit = job.get("recording_start_ms")
-    allow_folder_name_fallback = job.get("allow_folder_name_start_fallback", False)
-    if not isinstance(allow_folder_name_fallback, bool):
-        raise ValueError("allow_folder_name_start_fallback must be a boolean")
+    boolean_values = {
+        field: _job_boolean(job, field) for field in _BOOLEAN_JOB_FIELDS
+    }
+    allow_folder_name_fallback = boolean_values["allow_folder_name_start_fallback"]
+    run_id = job.get("run_id")
+    if run_id is not None and (not isinstance(run_id, str) or not run_id.strip()):
+        raise ValueError("run_id must be a non-empty string")
     anchors: list[dict[str, object]] = []
     for index, folder in enumerate(folders, start=1):
         try:
@@ -83,16 +107,17 @@ def _validated_job(job: dict[str, object]) -> tuple[list[Path], list[int], list[
                 "recording_date_source": date_source,
             }
         )
-    for left in range(len(anchors)):
-        for right in range(left + 1, len(anchors)):
-            first = int(anchors[left]["milliseconds_since_midnight"])
-            second = int(anchors[right]["milliseconds_since_midnight"])
-            difference = abs((second - first + 43_200_000) % 86_400_000 - 43_200_000)
-            if difference > 30_000:
-                raise ValueError(
-                    f"selected recording starts differ by {difference / 1000:.3f}s "
-                    f"(devices {left + 1} and {right + 1}; limit 30s)"
-                )
+    validate_recording_start_compatibility(
+        [
+            (
+                int(anchor["milliseconds_since_midnight"]),
+                str(anchor["recording_date"])
+                if anchor["recording_date"] is not None
+                else None,
+            )
+            for anchor in anchors
+        ]
+    )
     return folders, probes, anchors
 
 
@@ -102,15 +127,18 @@ def run_job(job_path: Path) -> int:
     _LAST_PROGRESS_PERCENT = -1.0
     job = json.loads(job_path.read_text(encoding="utf-8"))
     folders, probe_indices, recording_start_anchors = _validated_job(job)
-    allow_folder_name_fallback = bool(job.get("allow_folder_name_start_fallback", False))
+    boolean_values = {
+        field: _job_boolean(job, field) for field in _BOOLEAN_JOB_FIELDS
+    }
+    allow_folder_name_fallback = boolean_values["allow_folder_name_start_fallback"]
     options = SyncOptions(**job.get("sync_options", {}))
     pc_time_options = PcTimeOptions(**job.get("pc_time_options", {}))
     result = run_multidevice_sync(
         folders,
         master_index=int(job["master_index"]) - 1,
         output_folder=Path(job["output_folder"]),
-        overwrite=bool(job.get("overwrite", False)),
-        merge=bool(job.get("merge", True)),
+        overwrite=boolean_values["overwrite"],
+        merge=boolean_values["merge"],
         options=options,
         progress=_progress,
         native_pc_time=True,
@@ -119,9 +147,10 @@ def run_job(job_path: Path) -> int:
         pc_time_options=pc_time_options,
         probe_indices=probe_indices,
         recording_start_anchors=recording_start_anchors,
-        integrity_duplication_scan=bool(job.get("integrity_duplication_scan", True)),
-        write_event_files=bool(job.get("write_event_files", False)),
-        process_imu=bool(job.get("process_imu", False)),
+        integrity_duplication_scan=boolean_values["integrity_duplication_scan"],
+        write_event_files=boolean_values["write_event_files"],
+        process_imu=boolean_values["process_imu"],
+        run_id=(str(job["run_id"]) if job.get("run_id") is not None else None),
     )
     sync_status = result.outputs.get("sync_status", result.status)
     merge_status = result.outputs.get("merge_status", "NOT_RUN")
@@ -150,7 +179,8 @@ def run_job(job_path: Path) -> int:
     if sync_status == "WARN" or merge_status == "WARN" or analog_status == "WARN":
         print(
             "Python outputs were published with localized synchronization or merge warnings; "
-            "affected neural/analog samples are zero-filled and marked in their validity files."
+            "confirmed missing/overwritten samples are zero-filled in validity files, while "
+            "non-destructive alignment warnings are recorded in alignment_quality.dat."
         )
     if overall_status == "MERGE_ONLY":
         print("Python sync and merge complete with a PC-time warning; pc_time.dat was not published.")

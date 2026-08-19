@@ -9,7 +9,7 @@ output check, rather than another view of the fit observations.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Sequence
 
@@ -19,6 +19,7 @@ from ..binary_io import close_memmap
 from ..models import (
     ClassifiedInterval,
     DeviceGap,
+    DeviceSyncAnchor,
     DeviceSyncSegment,
     Recording,
     validate_device_sync_segments,
@@ -55,6 +56,30 @@ class PostMergeMeasurement:
     # callers remain compatible.
     recommended_canonical_start_sample: int | None = None
     recommended_canonical_end_sample: int | None = None
+    # Segment support is diagnostic/corrective authority, not an exclusion
+    # request.  It lets repeated measurements refine the segment mapping while
+    # isolated or inconsistent failures remain non-destructive warnings.
+    segment_canonical_start_sample: int | None = None
+    segment_canonical_end_sample: int | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class PostMergeSegmentCorrection:
+    """One evidence-gated constant residual-lag correction for a segment."""
+
+    device_index: int
+    canonical_start_sample: int
+    canonical_end_sample: int
+    lag_correction_samples: float
+    supporting_measurement_count: int
+    reliable_measurement_count: int
+    maximum_support_deviation_samples: float
+    support_canonical_samples: tuple[int, ...]
+    support_lag_samples: tuple[float, ...]
+    evidence_positions: tuple[str, ...]
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -785,7 +810,10 @@ def validate_segment_staged_merge(
     wide_max_lag_samples: int | None = None,
     max_allowed_abs_lag_samples: int = 4,
     min_peak_correlation: float = 0.05,
+    min_peak_to_background: float = 1.2,
+    min_peak_margin_fraction: float = 0.01,
     peak_exclusion_samples: int = 24,
+    dense_step_seconds: float | None = None,
     structural_only: bool = False,
 ) -> PostMergeValidationResult:
     """Verify staged output against independently fitted device segments.
@@ -794,9 +822,10 @@ def validate_segment_staged_merge(
     nor inherits a source step.  It validates global checkpoints, every
     publishable slave-segment interior, and both sides of each publishable
     join using short contiguous jointly-valid islands (up to one second).
-    An unavailable island is a recoverable ``WARN`` with no exclusion
-    recommendation.  Only a measured residual or correlation failure
-    recommends zero-filling that exact device-local measurement window.
+    An unavailable island is a recoverable ``WARN``. Reliable residual lag is
+    recorded against its independently fitted segment so repeated consistent
+    measurements can refine the mapping. No correlation measurement directly
+    recommends zero-filling measured neural data.
 
     ``device_segments`` is flat and uses one-based device indices, matching
     :class:`DeviceSyncSegment`.  Empty slave collections are permitted only
@@ -822,7 +851,12 @@ def validate_segment_staged_merge(
             max_allowed_abs_lag_samples=max_allowed_abs_lag_samples,
             min_peak_correlation=min_peak_correlation,
         )
-    if window_seconds <= 0 or max_lag_samples < 1 or max_allowed_abs_lag_samples < 0:
+    if (
+        window_seconds <= 0
+        or max_lag_samples < 1
+        or max_allowed_abs_lag_samples < 0
+        or (dense_step_seconds is not None and dense_step_seconds <= 0)
+    ):
         return _failure(
             "segment post-merge validation options must use positive window and lag values",
             amplifier_path=amplifier_path,
@@ -1126,7 +1160,10 @@ def validate_segment_staged_merge(
             nominal: int,
             window: tuple[int, int] | None,
             slave_index: int,
+            segment_bounds: tuple[int, int],
+            segment_identity_bounds: tuple[int, int],
         ) -> None:
+            segment_start, segment_end = segment_identity_bounds
             if window is None:
                 measurements.append(PostMergeMeasurement(
                     position=position,
@@ -1142,6 +1179,8 @@ def validate_segment_staged_merge(
                     passed=False,
                     message="no jointly valid verification window",
                     exclusion_device_indices=(slave_index + 1,),
+                    segment_canonical_start_sample=segment_start,
+                    segment_canonical_end_sample=segment_end,
                 ))
                 return
             start, count = window
@@ -1159,11 +1198,24 @@ def validate_segment_staged_merge(
                 )
                 lag_ok = abs(estimate.lag_samples) <= max_allowed_abs_lag_samples
                 correlation_ok = estimate.peak_correlation >= min_peak_correlation
+                background_ok = estimate.peak_to_background >= min_peak_to_background
+                margin_ok = estimate.peak_margin_fraction >= min_peak_margin_fraction
+                peak_reliable = correlation_ok and background_ok and margin_ok
                 reasons: list[str] = []
                 if not lag_ok:
                     reasons.append(f"residual lag {estimate.lag_samples} exceeds {max_allowed_abs_lag_samples} samples")
                 if not correlation_ok:
                     reasons.append(f"peak correlation {estimate.peak_correlation:.4g} below {min_peak_correlation:.4g}")
+                if not background_ok:
+                    reasons.append(
+                        f"peak/background {estimate.peak_to_background:.4g} below "
+                        f"{min_peak_to_background:.4g}"
+                    )
+                if not margin_ok:
+                    reasons.append(
+                        f"peak margin {estimate.peak_margin_fraction:.4g} below "
+                        f"{min_peak_margin_fraction:.4g}"
+                    )
                 if expanded:
                     reasons.append("hierarchical wide lag search used")
                 measurements.append(PostMergeMeasurement(
@@ -1177,15 +1229,11 @@ def validate_segment_staged_merge(
                     peak_correlation=estimate.peak_correlation,
                     peak_to_background=estimate.peak_to_background,
                     peak_margin_fraction=estimate.peak_margin_fraction,
-                    passed=lag_ok and correlation_ok,
+                    passed=lag_ok and peak_reliable,
                     message="; ".join(reasons),
                     exclusion_device_indices=(slave_index + 1,),
-                    recommended_canonical_start_sample=(
-                        canonical_start_sample + start if not (lag_ok and correlation_ok) else None
-                    ),
-                    recommended_canonical_end_sample=(
-                        canonical_start_sample + end if not (lag_ok and correlation_ok) else None
-                    ),
+                    segment_canonical_start_sample=segment_start,
+                    segment_canonical_end_sample=segment_end,
                 ))
             except (ValueError, FloatingPointError) as error:
                 measurements.append(PostMergeMeasurement(
@@ -1202,6 +1250,8 @@ def validate_segment_staged_merge(
                     passed=False,
                     message=f"lag measurement unavailable: {error}",
                     exclusion_device_indices=(slave_index + 1,),
+                    segment_canonical_start_sample=segment_start,
+                    segment_canonical_end_sample=segment_end,
                 ))
 
         for slave_index in range(len(recordings)):
@@ -1249,6 +1299,11 @@ def validate_segment_staged_merge(
                     position=f"global_{name}", fraction=fraction, nominal=nominal,
                     window=find_window(nominal, lower, upper, slave_index),
                     slave_index=slave_index,
+                    segment_bounds=(lower, upper),
+                    segment_identity_bounds=(
+                        containing.canonical_start_sample,
+                        containing.canonical_end_sample,
+                    ),
                 )
             for segment_number, segment in enumerate(publishable, start=1):
                 lower, upper = local_bounds(segment)
@@ -1258,7 +1313,36 @@ def validate_segment_staged_merge(
                     fraction=midpoint / max(1, n_output_samples - 1), nominal=midpoint,
                     window=find_window(midpoint, lower, upper, slave_index),
                     slave_index=slave_index,
+                    segment_bounds=(lower, upper),
+                    segment_identity_bounds=(
+                        segment.canonical_start_sample,
+                        segment.canonical_end_sample,
+                    ),
                 )
+                if dense_step_seconds is not None:
+                    dense_step = max(1, int(round(dense_step_seconds * fs)))
+                    dense_number = 0
+                    for dense_nominal in range(lower + dense_step // 2, upper, dense_step):
+                        if abs(dense_nominal - midpoint) < max(1, window_samples // 2):
+                            continue
+                        dense_number += 1
+                        measure(
+                            position=(
+                                f"segment{slave_index + 1}_{segment_number}_dense"
+                                f"{dense_number}"
+                            ),
+                            fraction=dense_nominal / max(1, n_output_samples - 1),
+                            nominal=dense_nominal,
+                            window=find_window(
+                                dense_nominal, lower, upper, slave_index
+                            ),
+                            slave_index=slave_index,
+                            segment_bounds=(lower, upper),
+                            segment_identity_bounds=(
+                                segment.canonical_start_sample,
+                                segment.canonical_end_sample,
+                            ),
+                        )
             for join_number, (before, after) in enumerate(zip(publishable, publishable[1:]), start=1):
                 before_lower, before_upper = local_bounds(before)
                 after_lower, after_upper = local_bounds(after)
@@ -1269,6 +1353,11 @@ def validate_segment_staged_merge(
                         before_upper - 1, before_lower, before_upper, slave_index
                     ),
                     slave_index=slave_index,
+                    segment_bounds=(before_lower, before_upper),
+                    segment_identity_bounds=(
+                        before.canonical_start_sample,
+                        before.canonical_end_sample,
+                    ),
                 )
                 measure(
                     position=f"segment{slave_index + 1}_join{join_number}_after",
@@ -1277,6 +1366,11 @@ def validate_segment_staged_merge(
                         after_lower, after_lower, after_upper, slave_index
                     ),
                     slave_index=slave_index,
+                    segment_bounds=(after_lower, after_upper),
+                    segment_identity_bounds=(
+                        after.canonical_start_sample,
+                        after.canonical_end_sample,
+                    ),
                 )
             # A master-only missing interval splits the canonical master's
             # mapping while a slave can remain one continuous segment.  Those
@@ -1319,6 +1413,11 @@ def validate_segment_staged_merge(
                             before_upper - 1, lower, upper, slave_index
                         ),
                         slave_index=slave_index,
+                        segment_bounds=(lower, upper),
+                        segment_identity_bounds=(
+                            before_segment.canonical_start_sample,
+                            before_segment.canonical_end_sample,
+                        ),
                     )
                 if after_segment is not None:
                     lower, upper = local_bounds(after_segment)
@@ -1328,6 +1427,11 @@ def validate_segment_staged_merge(
                         nominal=after_lower,
                         window=find_window(after_lower, lower, upper, slave_index),
                         slave_index=slave_index,
+                        segment_bounds=(lower, upper),
+                        segment_identity_bounds=(
+                            after_segment.canonical_start_sample,
+                            after_segment.canonical_end_sample,
+                        ),
                     )
     finally:
         close_memmap(mapped)
@@ -1344,18 +1448,9 @@ def validate_segment_staged_merge(
     local_failures = [item for item in measurements if not item.passed and not item.position.endswith("_all_invalid")]
     if local_failures or warnings:
         detail = "; ".join(warnings + [f"slave {item.slave_device_index} {item.position}: {item.message or 'unverified'}" for item in local_failures])
-        actionable = any(
-            item.recommended_canonical_start_sample is not None
-            and item.recommended_canonical_end_sample is not None
-            for item in local_failures
-        )
         return PostMergeValidationResult(
             status="WARN",
-            message=(
-                "segment post-merge validation recommends bounded exclusions: " + detail
-                if actionable
-                else "segment post-merge validation found non-actionable unavailable windows: " + detail
-            ),
+            message="segment post-merge validation found alignment warnings: " + detail,
             amplifier_path=str(amplifier_path), master_device_index=master_index + 1,
             n_output_samples=n_output_samples, n_output_channels=total_channels,
             window_samples=window_samples, max_allowed_abs_lag_samples=max_allowed_abs_lag_samples,
@@ -1372,13 +1467,279 @@ def validate_segment_staged_merge(
     )
 
 
+def _measurement_peak_is_reliable(
+    measurement: PostMergeMeasurement,
+    *,
+    min_peak_correlation: float,
+    min_peak_to_background: float,
+    min_peak_margin_fraction: float,
+) -> bool:
+    return bool(
+        measurement.lag_samples is not None
+        and measurement.peak_correlation is not None
+        and measurement.peak_to_background is not None
+        and measurement.peak_margin_fraction is not None
+        and np.isfinite(measurement.peak_correlation)
+        and np.isfinite(measurement.peak_to_background)
+        and np.isfinite(measurement.peak_margin_fraction)
+        and measurement.peak_correlation >= min_peak_correlation
+        and measurement.peak_to_background >= min_peak_to_background
+        and measurement.peak_margin_fraction >= min_peak_margin_fraction
+    )
+
+
+def infer_postmerge_segment_corrections(
+    result: PostMergeValidationResult,
+    *,
+    canonical_start_sample: int,
+    min_peak_to_background: float = 1.2,
+    min_peak_margin_fraction: float = 0.01,
+    minimum_supporting_measurements: int = 3,
+    maximum_lag_deviation_samples: float = 2.0,
+    minimum_consistent_fraction: float = 0.6,
+) -> tuple[PostMergeSegmentCorrection, ...]:
+    """Infer only repeated, internally consistent constant-lag corrections.
+
+    A single reliable failure remains a warning.  A correction requires a
+    majority plateau across at least three independently located windows in
+    the same fitted segment.  The renderer later reuses raw input, so this
+    function never shifts an already interpolated staged waveform.
+    """
+
+    if minimum_supporting_measurements < 3:
+        raise ValueError("minimum_supporting_measurements must be at least three")
+    if maximum_lag_deviation_samples < 0:
+        raise ValueError("maximum_lag_deviation_samples must be non-negative")
+    if not 0 < minimum_consistent_fraction <= 1:
+        raise ValueError("minimum_consistent_fraction must be in (0, 1]")
+    grouped: dict[tuple[int, int, int], list[PostMergeMeasurement]] = {}
+    for measurement in result.measurements:
+        start = measurement.segment_canonical_start_sample
+        end = measurement.segment_canonical_end_sample
+        if start is None or end is None or end <= start:
+            continue
+        if not _measurement_peak_is_reliable(
+            measurement,
+            min_peak_correlation=result.min_peak_correlation,
+            min_peak_to_background=min_peak_to_background,
+            min_peak_margin_fraction=min_peak_margin_fraction,
+        ):
+            continue
+        # Tiny edge islands can identify a local warning but are not strong
+        # enough to move a complete raw-source mapping.
+        if measurement.window_end_sample - measurement.window_start_sample < max(
+            4, result.window_samples
+        ):
+            continue
+        grouped.setdefault((measurement.slave_device_index, start, end), []).append(
+            measurement
+        )
+
+    corrections: list[PostMergeSegmentCorrection] = []
+    for (device_index, start, end), measurements in sorted(grouped.items()):
+        ordered = sorted(
+            measurements,
+            key=lambda item: (
+                (item.window_start_sample + item.window_end_sample) // 2,
+                item.position,
+            ),
+        )
+        lags = np.asarray([float(item.lag_samples) for item in ordered], dtype=np.float64)
+        median = float(np.median(lags))
+        consistent = np.abs(lags - median) <= maximum_lag_deviation_samples
+        support_count = int(np.count_nonzero(consistent))
+        if support_count < minimum_supporting_measurements:
+            continue
+        if support_count / len(ordered) < minimum_consistent_fraction:
+            continue
+        support = [item for item, keep in zip(ordered, consistent) if keep]
+        correction = float(np.median([float(item.lag_samples) for item in support]))
+        if abs(correction) <= result.max_allowed_abs_lag_samples:
+            continue
+        support_samples = tuple(
+            canonical_start_sample
+            + (item.window_start_sample + item.window_end_sample) // 2
+            for item in support
+        )
+        # A valid island selected near a nominal checkpoint can coincide with
+        # another checkpoint. Collapse duplicate support coordinates.
+        unique: dict[int, PostMergeMeasurement] = {}
+        for sample, item in zip(support_samples, support):
+            unique.setdefault(sample, item)
+        if len(unique) < minimum_supporting_measurements:
+            continue
+        samples = tuple(sorted(unique))
+        support = [unique[sample] for sample in samples]
+        support_lags = tuple(float(item.lag_samples) for item in support)
+        corrections.append(
+            PostMergeSegmentCorrection(
+                device_index=device_index,
+                canonical_start_sample=start,
+                canonical_end_sample=end,
+                lag_correction_samples=correction,
+                supporting_measurement_count=len(samples),
+                reliable_measurement_count=len(ordered),
+                maximum_support_deviation_samples=max(
+                    abs(value - correction) for value in support_lags
+                ),
+                support_canonical_samples=samples,
+                support_lag_samples=support_lags,
+                evidence_positions=tuple(item.position for item in support),
+            )
+        )
+    return tuple(corrections)
+
+
+def apply_postmerge_segment_corrections(
+    device_segments: Sequence[DeviceSyncSegment],
+    corrections: Sequence[PostMergeSegmentCorrection],
+) -> tuple[tuple[DeviceSyncSegment, ...], tuple[PostMergeSegmentCorrection, ...], tuple[str, ...]]:
+    """Apply safe correction candidates without source reuse or extrapolation."""
+
+    current = list(device_segments)
+    applied: list[PostMergeSegmentCorrection] = []
+    rejected: list[str] = []
+    for correction in corrections:
+        index = next(
+            (
+                position
+                for position, segment in enumerate(current)
+                if segment.device_index == correction.device_index
+                and segment.canonical_start_sample == correction.canonical_start_sample
+                and segment.canonical_end_sample == correction.canonical_end_sample
+            ),
+            None,
+        )
+        if index is None:
+            rejected.append(
+                f"device {correction.device_index} segment "
+                f"[{correction.canonical_start_sample},{correction.canonical_end_sample}) "
+                "was not found"
+            )
+            continue
+        segment = current[index]
+        intercept = segment.source_intercept_samples + correction.lag_correction_samples
+        scale = segment.source_scale
+        supported_start = max(
+            segment.canonical_start_sample,
+            int(np.ceil((segment.source_start_sample - intercept - 1e-9) / scale)),
+        )
+        supported_end = min(
+            segment.canonical_end_sample,
+            int(np.floor((segment.source_end_sample - 1 - intercept + 1e-9) / scale)) + 1,
+        )
+        anchors: list[DeviceSyncAnchor] = []
+        residuals: list[float] = []
+        for canonical, lag in zip(
+            correction.support_canonical_samples, correction.support_lag_samples
+        ):
+            if not supported_start <= canonical < supported_end:
+                continue
+            source = (
+                segment.source_scale * canonical
+                + segment.source_intercept_samples
+                + lag
+            )
+            residual = source - (scale * canonical + intercept)
+            anchors.append(
+                DeviceSyncAnchor(
+                    canonical_sample=canonical,
+                    source_sample=source,
+                    verified=True,
+                    confidence="medium",
+                    evidence="repeated reliable staged residual-lag correction",
+                )
+            )
+            residuals.append(float(residual))
+        if supported_end <= supported_start or len(anchors) < 2:
+            rejected.append(
+                f"device {correction.device_index} correction lacks bounded raw support"
+            )
+            continue
+        rms = float(np.sqrt(np.mean(np.square(residuals))))
+        maximum = float(np.max(np.abs(residuals)))
+        candidate = replace(
+            segment,
+            canonical_start_sample=supported_start,
+            canonical_end_sample=supported_end,
+            source_intercept_samples=intercept,
+            anchors=tuple(anchors),
+            residual_rms_samples=rms,
+            residual_max_abs_samples=maximum,
+            confidence="medium",
+            start_transition="postmerge_corrected",
+            end_transition="postmerge_corrected",
+            publishable=True,
+            evidence=(
+                f"post-merge correction {correction.lag_correction_samples:+.3f} samples "
+                f"from {correction.supporting_measurement_count} consistent windows"
+            ),
+        )
+        proposed = list(current)
+        proposed[index] = candidate
+        try:
+            for device_index in sorted({item.device_index for item in proposed}):
+                validate_device_sync_segments(
+                    [item for item in proposed if item.device_index == device_index],
+                    device_index=device_index,
+                )
+        except ValueError as error:
+            rejected.append(
+                f"device {correction.device_index} correction rejected: {error}"
+            )
+            continue
+        current = proposed
+        applied.append(correction)
+    return tuple(current), tuple(applied), tuple(rejected)
+
+
+def postmerge_alignment_warning_intervals(
+    result: PostMergeValidationResult,
+    *,
+    canonical_start_sample: int,
+) -> tuple[dict[str, object], ...]:
+    """Describe warned support without converting uncertainty into zero-fill."""
+
+    intervals: dict[tuple[int, int, int], set[str]] = {}
+    for measurement in result.measurements:
+        if measurement.passed or measurement.position.endswith("_all_invalid"):
+            continue
+        # A failed checkpoint establishes uncertainty only in the measured
+        # window. Repeated, reliable constant lag is handled separately by the
+        # segment-correction path; an isolated or ambiguous peak does not
+        # justify masking a complete multi-hour segment.
+        start = canonical_start_sample + measurement.window_start_sample
+        end = canonical_start_sample + measurement.window_end_sample
+        if end <= start:
+            continue
+        key = (measurement.slave_device_index, int(start), int(end))
+        intervals.setdefault(key, set()).add(measurement.position)
+    return tuple(
+        {
+            "affected_device_indices": [device],
+            "canonical_start_sample": start,
+            "canonical_end_sample": end,
+            "kind": "alignment_warn",
+            "action": "keep_measured_data",
+            "evidence": "post-merge QC warning: " + ", ".join(sorted(labels)),
+        }
+        for (device, start, end), labels in sorted(intervals.items())
+    )
+
+
 def postmerge_exclusion_intervals(
     result: PostMergeValidationResult,
     *,
     canonical_start_sample: int,
     device_count: int,
 ) -> tuple[ClassifiedInterval, ...]:
-    """Return unioned canonical exclusions recommended by a WARN result."""
+    """Return only explicit zero-fill recommendations from a WARN result.
+
+    Segment validation no longer emits these.  The function remains for
+    compatibility with callers that construct an explicit recommendation;
+    unavailable or low-confidence boundary measurements never fall through to
+    an implicit one-second exclusion.
+    """
 
     if result.status != "WARN" or device_count < 1:
         return ()
@@ -1402,24 +1763,7 @@ def postmerge_exclusion_intervals(
             if devices and end > start:
                 candidates.append((devices, start, end, measurement.position))
             continue
-        devices: tuple[int, ...] = ()
-        if measurement.position.startswith("boundary"):
-            devices = measurement.exclusion_device_indices or all_devices
-        elif (
-            measurement.position in {"start", "end"}
-            and measurement.lag_samples is not None
-            and measurement.peak_correlation is not None
-            and measurement.peak_correlation >= result.min_peak_correlation
-            and abs(measurement.lag_samples) > result.max_allowed_abs_lag_samples
-        ):
-            devices = all_devices
-        if not devices:
-            continue
-        start = max(canonical_start_sample, canonical_start_sample + measurement.window_start_sample)
-        end = min(output_end, canonical_start_sample + measurement.window_end_sample)
-        if end <= start:
-            continue
-        candidates.append((devices, start, end, measurement.position))
+        continue
 
     merged: list[ClassifiedInterval] = []
     for devices in sorted({item[0] for item in candidates}):

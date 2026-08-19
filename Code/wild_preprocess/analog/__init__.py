@@ -29,6 +29,7 @@ from .imu import (
     build_imu_from_merged,
     build_synchronized_imu,
     build_filtered_imu_from_merged,
+    imu_capacity_issue,
     project_raw_imu_intervals_to_canonical,
     write_synchronized_imu_mat,
 )
@@ -66,6 +67,7 @@ __all__ = [
     "build_synchronized_imu",
     "build_filtered_imu_from_merged",
     "build_imu_from_merged",
+    "imu_capacity_issue",
     "project_raw_imu_intervals_to_canonical",
     "write_synchronized_imu_mat",
     "AhrsFilter",
