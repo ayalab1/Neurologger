@@ -1,0 +1,6 @@
+{
+  "version": "3.4.2.138",
+  "url": "https://github.com/ayalab1/Neurologger/raw/main/Software/wild_console_Setup_3.4.2.138.exe",
+  "sha256": "697DA31F327052B5939F6C6461ECA5754F19CB22ADBFA4E451686629FD319EED",
+  "notes": "Publishes every current CE/WILD advertisement from all WB55/nRF dongles and Windows Bluetooth, deduplicated by BLE address, while rejecting unrelated FFF0 devices by name."
+}
