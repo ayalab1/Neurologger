@@ -105,7 +105,7 @@ nav:
       - Programmatic Workflows: software/api-cli.md
   - Analysis:
       - analysis/index.md
-      - Python: analysis/python.md
+      - Data processing: analysis/data-processing.md
       - MATLAB: analysis/matlab.md
       - Spike Sorting: analysis/spike-sorting.md
   - Examples: examples/index.md
