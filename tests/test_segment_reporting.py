@@ -250,12 +250,21 @@ class SegmentReportingTest(unittest.TestCase):
             all_text = [text.get_text() for axis in figure.axes for text in axis.texts]
             all_text.extend(text.get_text() for text in figure.texts)
             self.assertNotIn(long_label, all_text)
-            self.assertTrue(any("segments 2/2 verified; reacquired 0; fully invalid device(s) 2" in text for text in all_text))
-            self.assertTrue(any("\ntiming: total 2.00s" in text for text in all_text))
-            self.assertLessEqual(
-                sum("segments " in text or text.startswith("timing:") for text in all_text),
-                2,
+            validity_legend = figure.axes[1].get_legend()
+            self.assertIsNotNone(validity_legend)
+            legend_title = validity_legend.get_title().get_text()
+            self.assertIn(
+                "segments 2/2 verified; reacquired 0; fully invalid device(s) 2",
+                legend_title,
             )
+            self.assertIn("timing: total 2.00s", legend_title)
+            residual_labels = [
+                text.get_text()
+                for text in figure.axes[0].get_legend().get_texts()
+            ]
+            self.assertIn("boundary > limit", residual_labels)
+            self.assertIn("zero residual", residual_labels)
+            self.assertNotIn("join check", residual_labels)
         finally:
             import matplotlib.pyplot as plt
 
@@ -289,9 +298,9 @@ class SegmentReportingTest(unittest.TestCase):
             self.assertIsNotNone(validity_legend)
             legend_labels = [text.get_text() for text in validity_legend.get_texts()]
             self.assertIn("unverified mapping", legend_labels)
-            self.assertIn("missing data", legend_labels)
+            self.assertIn("missing", legend_labels)
             self.assertNotEqual(_UNVERIFIED_MAPPING_COLOR, _REASON_COLORS["missing"])
-            pc_text = [text.get_text() for text in figure.axes[2].texts]
+            pc_text = [text.get_text() for text in figure.axes[3].texts]
             self.assertIn("PC-time unavailable: no packed clock updates", pc_text)
         finally:
             import matplotlib.pyplot as plt

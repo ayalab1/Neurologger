@@ -18,6 +18,7 @@ if str(CODE_ROOT) not in sys.path:
 
 from wild_preprocess.models import (
     DeviceGap,
+    DeviceSyncAnchor,
     Recording,
     RelativeOffsetStep,
     SyncModel,
@@ -32,10 +33,11 @@ from wild_preprocess.sync.gaps import (
     infer_device_gaps,
     verify_isolated_offset_alias,
 )
-from wild_preprocess.sync.infer import fit_affine_sync_model
+from wild_preprocess.sync.infer import fit_affine_sync_model, fit_independent_device_segments
 from wild_preprocess.sync.merge import _common_master_interval, _source_coordinates, _write_interleaved_stream
 from wild_preprocess.sync.observe import estimate_lag_narrow_wide, observe_pair
 from wild_preprocess.pipeline import (
+    _localized_adaptive_half_guard_samples,
     _unlocalized_adaptive_half_window_samples,
     run_multidevice_sync,
 )
@@ -57,6 +59,44 @@ def _observation(time_sec: float, offset: float) -> SyncObservation:
 
 
 class AdaptiveBoundaryUncertaintyTest(unittest.TestCase):
+    def test_localized_boundary_uses_sample_guard_not_observation_window(self) -> None:
+        options = SyncOptions(
+            step_seconds=5.0,
+            unresolved_boundary_guard_samples=100,
+        )
+
+        self.assertEqual(_localized_adaptive_half_guard_samples(-4.0, options), 100)
+        self.assertEqual(_localized_adaptive_half_guard_samples(4.0, options), 100)
+
+    def test_large_backward_transition_guard_prevents_source_reuse(self) -> None:
+        options = SyncOptions(unresolved_boundary_guard_samples=100)
+
+        guard = _localized_adaptive_half_guard_samples(-1_000.0, options)
+        self.assertEqual(guard, 516)
+        anchors = (
+            DeviceSyncAnchor(1_000, 1_000.0, True, "high"),
+            DeviceSyncAnchor(4_000, 4_000.0, True, "high"),
+            DeviceSyncAnchor(6_000, 5_000.0, True, "high"),
+            DeviceSyncAnchor(9_000, 8_000.0, True, "high"),
+        )
+        segments = fit_independent_device_segments(
+            anchors,
+            [5_000],
+            device_index=2,
+            canonical_start_sample=0,
+            canonical_end_sample=10_000,
+            source_sample_count=10_000,
+            unresolved_ranges=[(5_000 - guard, 5_000 + guard)],
+        )
+        self.assertEqual(len(segments), 2)
+        previous_last = segments[0].map_canonical_sample(
+            segments[0].canonical_end_sample - 1
+        )
+        next_first = segments[1].map_canonical_sample(
+            segments[1].canonical_start_sample
+        )
+        self.assertGreater(next_first, previous_last)
+
     def test_unlocalized_boundary_covers_one_missing_observation(self) -> None:
         options = SyncOptions(
             step_seconds=5.0,
@@ -77,6 +117,18 @@ class AdaptiveBoundaryUncertaintyTest(unittest.TestCase):
         self.assertEqual(
             _unlocalized_adaptive_half_window_samples(options, 20_000),
             100,
+        )
+
+    def test_unlocalized_guard_uses_cadence_when_window_is_shorter(self) -> None:
+        options = SyncOptions(
+            window_seconds=2.0,
+            step_seconds=8.0,
+            unresolved_boundary_guard_samples=100,
+        )
+
+        self.assertEqual(
+            _unlocalized_adaptive_half_window_samples(options, 1_000),
+            8_000,
         )
 
 
@@ -736,6 +788,186 @@ class GapAwareSyncTest(unittest.TestCase):
         self.assertTrue(reacquired)
         self.assertTrue(any(abs(item.observed_offset_samples + 30) <= 1 for item in reacquired))
 
+    def test_four_sample_adaptive_loss_keeps_data_outside_localized_join(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fs = 1_000
+            sample_count = 40_000
+            gap_start = 20_000
+            gap_size = 4
+            rng = np.random.default_rng(144)
+            canonical = rng.normal(scale=500.0, size=sample_count)
+            canonical += 800.0 * np.sin(
+                2 * np.pi * 350 * np.arange(sample_count) / fs
+            )
+            signals = (
+                canonical,
+                np.concatenate(
+                    (canonical[:gap_start], canonical[gap_start + gap_size :])
+                ),
+                canonical,
+            )
+            folders: list[Path] = []
+            for device_index, signal in enumerate(signals):
+                folder = root / f"device{device_index}" / "recording"
+                folder.mkdir(parents=True)
+                channels = np.column_stack([signal + channel for channel in range(4)])
+                np.clip(np.rint(channels), -32768, 32767).astype("<i2").tofile(
+                    folder / "amplifier.dat"
+                )
+                np.zeros(
+                    (max(1, int(np.floor(signal.size * 1_250 / fs))), 1),
+                    dtype="<i2",
+                ).tofile(
+                    folder / "analogin.dat"
+                )
+                header = bytearray(512)
+                struct.pack_into("<I", header, 0, fs)
+                struct.pack_into("<I", header, 8, 4)
+                (folder / "CE_params.bin").write_bytes(header)
+                folders.append(folder)
+
+            result = run_multidevice_sync(
+                folders,
+                master_index=0,
+                output_folder=root / "output",
+                merge=True,
+                options=SyncOptions(
+                    initial_start_seconds=2.0,
+                    initial_duration_seconds=8.0,
+                    initial_max_lag_seconds=1.0,
+                    window_seconds=2.0,
+                    step_seconds=1.0,
+                    tracking_max_lag_samples=20,
+                    reacquisition_max_lag_seconds=1.0,
+                    highpass_hz=200.0,
+                    peak_exclusion_samples=12,
+                    gap_min_step_samples=50.0,
+                    gap_persistence_observations=2,
+                    gap_event_time_tolerance_seconds=1.5,
+                    unresolved_boundary_guard_samples=100,
+                    max_parallel_workers=1,
+                    chunk_seconds=2.0,
+                ),
+            )
+
+            self.assertEqual(
+                [(gap.device_index, gap.missing_samples) for gap in result.device_gaps],
+                [(2, gap_size)],
+            )
+            validity = np.fromfile(
+                root / "output" / "valid_samples.dat", dtype=np.uint8
+            ).reshape(-1, 3)
+            invalid = int(np.count_nonzero(validity[:, 1] == 0))
+            self.assertGreaterEqual(invalid, gap_size)
+            self.assertLess(invalid, 400)
+            self.assertTrue(np.all(validity[:, 0] == 1))
+            self.assertTrue(np.all(validity[:, 2] == 1))
+            amplifier = np.fromfile(
+                root / "output" / "amplifier.dat", dtype="<i2"
+            ).reshape(-1, 12)
+            published_slave = validity[:, 1] == 1
+            np.testing.assert_array_equal(
+                amplifier[published_slave, 4],
+                amplifier[published_slave, 0],
+            )
+            localized = [
+                item
+                for item in result.targeted_attributions
+                if item["kind"] == "slave"
+            ]
+            self.assertTrue(localized)
+            self.assertTrue(localized[0]["boundary_localized"])
+
+    def test_unlocalized_master_loss_excludes_uncertain_all_device_bracket(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fs = 1_000
+            sample_count = 40_000
+            gap_start = 20_000
+            gap_size = 4
+            rng = np.random.default_rng(2_014)
+            canonical = rng.normal(scale=500.0, size=sample_count)
+            canonical += 800.0 * np.sin(
+                2 * np.pi * 350 * np.arange(sample_count) / fs
+            )
+            canonical[gap_start - 300 : gap_start + 300] = 0.0
+            signals = (
+                np.concatenate(
+                    (canonical[:gap_start], canonical[gap_start + gap_size :])
+                ),
+                canonical,
+                canonical,
+            )
+            folders: list[Path] = []
+            for device_index, signal in enumerate(signals):
+                folder = root / f"device{device_index}" / "recording"
+                folder.mkdir(parents=True)
+                channels = np.column_stack([signal + channel for channel in range(4)])
+                np.clip(np.rint(channels), -32768, 32767).astype("<i2").tofile(
+                    folder / "amplifier.dat"
+                )
+                np.zeros(
+                    (max(1, int(np.floor(signal.size * 1_250 / fs))), 1),
+                    dtype="<i2",
+                ).tofile(folder / "analogin.dat")
+                header = bytearray(512)
+                struct.pack_into("<I", header, 0, fs)
+                struct.pack_into("<I", header, 8, 4)
+                (folder / "CE_params.bin").write_bytes(header)
+                folders.append(folder)
+
+            result = run_multidevice_sync(
+                folders,
+                master_index=0,
+                output_folder=root / "output",
+                merge=True,
+                options=SyncOptions(
+                    initial_start_seconds=2.0,
+                    initial_duration_seconds=8.0,
+                    initial_max_lag_seconds=1.0,
+                    window_seconds=2.0,
+                    step_seconds=1.0,
+                    tracking_max_lag_samples=20,
+                    reacquisition_max_lag_seconds=1.0,
+                    highpass_hz=200.0,
+                    peak_exclusion_samples=12,
+                    gap_min_step_samples=50.0,
+                    gap_persistence_observations=2,
+                    gap_event_time_tolerance_seconds=1.5,
+                    unresolved_boundary_guard_samples=100,
+                    max_parallel_workers=1,
+                    chunk_seconds=2.0,
+                ),
+            )
+
+            master_gaps = [
+                gap for gap in result.device_gaps if gap.device_index == 1
+            ]
+            self.assertEqual(len(master_gaps), 1)
+            self.assertEqual(master_gaps[0].missing_samples, gap_size)
+            decisions = [
+                item
+                for item in result.targeted_attributions
+                if item["kind"] == "master"
+            ]
+            self.assertEqual(len(decisions), 1)
+            self.assertFalse(decisions[0]["boundary_localized"])
+            self.assertTrue(result.unresolved_boundaries)
+            validity = np.fromfile(
+                root / "output" / "valid_samples.dat", dtype=np.uint8
+            ).reshape(-1, 3)
+            uncertain = np.all(validity == 0, axis=1)
+            self.assertGreaterEqual(int(np.count_nonzero(uncertain)), 1_900)
+            amplifier = np.fromfile(
+                root / "output" / "amplifier.dat", dtype="<i2"
+            ).reshape(-1, 12)
+            published = np.all(validity == 1, axis=1)
+            np.testing.assert_array_equal(
+                amplifier[published, 0],
+                amplifier[published, 4],
+            )
+
     def test_gap_aware_stream_zero_fills_only_affected_device(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -933,6 +1165,11 @@ class GapAwareSyncTest(unittest.TestCase):
             self.assertTrue(np.all(validity[:, 0] == 1))
             self.assertTrue(np.all(validity[:, 2] == 1))
             self.assertTrue(np.any(validity[:, 1] == 0))
+            # The adaptive transition is searched over a two-second window,
+            # but a full-rate-localized event must not zero that complete
+            # 4,000-sample envelope. Only the physical gap and bounded join
+            # protection remain invalid in this clean synthetic case.
+            self.assertLess(int(np.count_nonzero(validity[:, 1] == 0)), 1_000)
             manifest = json.loads(
                 (output / "wild_preprocess_run.json").read_text(encoding="utf-8")
             )

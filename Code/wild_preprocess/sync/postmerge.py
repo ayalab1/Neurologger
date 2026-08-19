@@ -1697,23 +1697,294 @@ def postmerge_alignment_warning_intervals(
     result: PostMergeValidationResult,
     *,
     canonical_start_sample: int,
+    min_peak_to_background: float = 1.2,
+    min_peak_margin_fraction: float = 0.01,
+    recovery_pass_windows: int = 2,
+    minimum_continuous_failure_windows: int = 2,
+    mask_unreliable_windows: bool = False,
 ) -> tuple[dict[str, object], ...]:
-    """Describe warned support without converting uncertainty into zero-fill."""
+    """Describe continuous warned support without zero-filling neural data.
 
-    intervals: dict[tuple[int, int, int], set[str]] = {}
+    A reliable out-of-limit lag is direct evidence of misalignment.  Sparse
+    checkpoint windows cannot establish where that regime starts or ends, so
+    the warning is extended within the authoritative segment until two
+    consecutive reliable passing windows establish recovery on each side.
+    Ambiguous or unavailable measurements remain diagnostic-only by default
+    and cannot count as recovery evidence.  Callers may explicitly request
+    window-local masking for that lower-specificity evidence.
+    """
+
+    if recovery_pass_windows < 2:
+        raise ValueError("post-merge recovery requires at least two passing windows")
+    if minimum_continuous_failure_windows < 1:
+        raise ValueError("continuous warning requires at least one failure window")
+
+    def reliable(measurement: PostMergeMeasurement) -> bool:
+        return _measurement_peak_is_reliable(
+            measurement,
+            min_peak_correlation=result.min_peak_correlation,
+            min_peak_to_background=min_peak_to_background,
+            min_peak_margin_fraction=min_peak_margin_fraction,
+        )
+
+    def hard_failure(measurement: PostMergeMeasurement) -> bool:
+        return bool(
+            reliable(measurement)
+            and measurement.lag_samples is not None
+            and abs(measurement.lag_samples) > result.max_allowed_abs_lag_samples
+        )
+
+    segment_measurements: dict[
+        tuple[int, int, int], list[PostMergeMeasurement]
+    ] = {}
+    for measurement in result.measurements:
+        segment_start = measurement.segment_canonical_start_sample
+        segment_end = measurement.segment_canonical_end_sample
+        if (
+            segment_start is not None
+            and segment_end is not None
+            and segment_end > segment_start
+        ):
+            segment_measurements.setdefault(
+                (measurement.slave_device_index, segment_start, segment_end), []
+            ).append(measurement)
+
+    def collapsed_windows(
+        measurements: list[PostMergeMeasurement],
+    ) -> list[tuple[int, int, list[PostMergeMeasurement]]]:
+        windows: list[tuple[int, int, list[PostMergeMeasurement]]] = []
+        for measurement in sorted(
+            measurements,
+            key=lambda item: (
+                item.window_start_sample,
+                item.window_end_sample,
+                item.position,
+            ),
+        ):
+            start = int(measurement.window_start_sample)
+            end = int(measurement.window_end_sample)
+            if windows and start < windows[-1][1]:
+                previous_start, previous_end, previous_measurements = windows[-1]
+                windows[-1] = (
+                    previous_start,
+                    max(previous_end, end),
+                    [*previous_measurements, measurement],
+                )
+            else:
+                windows.append((start, end, [measurement]))
+        return windows
+
+    # A broad warning needs repeated, independent hard failures with no
+    # reliable passing checkpoint between them.  A pass breaks the run;
+    # ambiguous evidence neither proves recovery nor creates a failure run.
+    broad_windows: dict[tuple[int, int, int], set[tuple[int, int]]] = {}
+    for key, measurements in segment_measurements.items():
+        windows = collapsed_windows(measurements)
+        hard_run: list[tuple[int, int]] = []
+
+        def finish_hard_run() -> None:
+            if len(hard_run) >= minimum_continuous_failure_windows:
+                broad_windows.setdefault(key, set()).update(hard_run)
+            hard_run.clear()
+
+        for start, end, window_measurements in windows:
+            reliable_measurements = [
+                measurement
+                for measurement in window_measurements
+                if reliable(measurement)
+            ]
+            if any(
+                measurement.lag_samples is not None
+                and abs(measurement.lag_samples)
+                > result.max_allowed_abs_lag_samples
+                for measurement in reliable_measurements
+            ):
+                hard_run.append((start, end))
+            elif window_measurements and all(
+                reliable(measurement) and measurement.passed
+                for measurement in window_measurements
+            ):
+                finish_hard_run()
+        finish_hard_run()
+
+    grouped: dict[tuple[int, int, int], list[PostMergeMeasurement]] = {}
+    candidates: list[tuple[int, int, int, tuple[int, int, int] | None, set[str]]] = []
     for measurement in result.measurements:
         if measurement.passed or measurement.position.endswith("_all_invalid"):
             continue
-        # A failed checkpoint establishes uncertainty only in the measured
-        # window. Repeated, reliable constant lag is handled separately by the
-        # segment-correction path; an isolated or ambiguous peak does not
-        # justify masking a complete multi-hour segment.
+        segment_start = measurement.segment_canonical_start_sample
+        segment_end = measurement.segment_canonical_end_sample
+        key = (measurement.slave_device_index, segment_start, segment_end)
+        is_broad_failure = bool(
+            hard_failure(measurement)
+            and any(
+                measurement.window_start_sample < broad_end
+                and measurement.window_end_sample > broad_start
+                for broad_start, broad_end in broad_windows.get(key, set())
+            )
+        )
+        if is_broad_failure:
+            grouped.setdefault(key, [])
+            continue
+        if not hard_failure(measurement) and not mask_unreliable_windows:
+            continue
+        # A single reliable failure remains local.  Low-specificity evidence
+        # is also local only when the caller explicitly requests that stricter
+        # quality policy; neither case can claim a broad physical timing error.
         start = canonical_start_sample + measurement.window_start_sample
         end = canonical_start_sample + measurement.window_end_sample
-        if end <= start:
+        if end > start:
+            candidates.append(
+                (
+                    measurement.slave_device_index,
+                    int(start),
+                    int(end),
+                    None,
+                    {measurement.position},
+                )
+            )
+
+    # All measurements in a segment are required to identify confirmed pass
+    # pairs around its reliable failures.  Measurements sharing a physical
+    # window are collapsed so duplicate global/dense labels do not fabricate
+    # two independent recovery passes.
+    for measurement in result.measurements:
+        segment_start = measurement.segment_canonical_start_sample
+        segment_end = measurement.segment_canonical_end_sample
+        key = (
+            measurement.slave_device_index,
+            segment_start,
+            segment_end,
+        )
+        if segment_start is not None and segment_end is not None and key in grouped:
+            grouped[key].append(measurement)
+
+    for key, measurements in sorted(grouped.items()):
+        device, segment_start, segment_end = key
+        local_segment_start = max(0, segment_start - canonical_start_sample)
+        local_segment_end = min(
+            result.n_output_samples, segment_end - canonical_start_sample
+        )
+        if local_segment_end <= local_segment_start:
             continue
-        key = (measurement.slave_device_index, int(start), int(end))
-        intervals.setdefault(key, set()).add(measurement.position)
+        # Global, dense, interior, and join labels can select the same or an
+        # overlapping valid island.  Collapse those observations before the
+        # state machine so one piece of waveform evidence cannot count as two
+        # independent recovery passes.
+        window_groups = collapsed_windows(measurements)
+
+        events: list[dict[str, object]] = []
+        for window_start, window_end, window_measurements in window_groups:
+            reliable_measurements = [
+                measurement
+                for measurement in window_measurements
+                if reliable(measurement)
+            ]
+            is_hard_failure = any(
+                measurement.lag_samples is not None
+                and abs(measurement.lag_samples)
+                > result.max_allowed_abs_lag_samples
+                for measurement in reliable_measurements
+            )
+            is_failure = bool(
+                is_hard_failure
+                and (window_start, window_end) in broad_windows.get(key, set())
+            )
+            is_pass = bool(window_measurements) and not is_hard_failure and all(
+                reliable(measurement) and measurement.passed
+                for measurement in window_measurements
+            )
+            events.append(
+                {
+                    "start": max(local_segment_start, window_start),
+                    "end": min(local_segment_end, window_end),
+                    "state": "fail" if is_failure else "pass" if is_pass else "unknown",
+                    "labels": {
+                        measurement.position for measurement in window_measurements
+                    },
+                }
+            )
+
+        def confirmed_pass_before(index: int) -> int | None:
+            run = 0
+            closest_pass_end: int | None = None
+            for position in range(index - 1, -1, -1):
+                if events[position]["state"] == "pass":
+                    if run == 0:
+                        closest_pass_end = int(events[position]["end"])
+                    run += 1
+                    if run >= recovery_pass_windows:
+                        # Return the pass closest to the failure.  Its complete
+                        # measured window is known good; uncertainty starts
+                        # immediately after it.
+                        return closest_pass_end
+                else:
+                    # An ambiguous/unavailable checkpoint is no evidence for
+                    # either state.  Skip it rather than making low-signal
+                    # periods prolong a known bad regime; another reliable
+                    # failure still resets recovery below.
+                    if events[position]["state"] == "fail":
+                        run = 0
+                        closest_pass_end = None
+            return None
+
+        def confirmed_pass_after(index: int) -> int | None:
+            run = 0
+            for position in range(index + 1, len(events)):
+                if events[position]["state"] == "pass":
+                    run += 1
+                    if run >= recovery_pass_windows:
+                        # Keep the first recovery pass inside the conservative
+                        # interval; the second consecutive pass re-opens it.
+                        return int(events[position]["start"])
+                else:
+                    if events[position]["state"] == "fail":
+                        run = 0
+            return None
+
+        for index, event in enumerate(events):
+            if event["state"] != "fail":
+                continue
+            start = confirmed_pass_before(index)
+            end = confirmed_pass_after(index)
+            start = local_segment_start if start is None else start
+            end = local_segment_end if end is None else end
+            start = min(start, int(event["start"]))
+            end = max(end, int(event["end"]))
+            if end > start:
+                candidates.append(
+                    (
+                        device,
+                        canonical_start_sample + start,
+                        canonical_start_sample + end,
+                        key,
+                        set(event["labels"]),
+                    )
+                )
+
+    # Merge only warnings with the same segment authority.  Adjacent segments
+    # must establish recovery independently and cannot lend pass evidence to
+    # one another.
+    merged: list[tuple[int, int, int, tuple[int, int, int] | None, set[str]]] = []
+    for candidate in sorted(candidates, key=lambda item: (item[0], item[3] or (), item[1], item[2])):
+        device, start, end, segment_key, labels = candidate
+        if (
+            merged
+            and merged[-1][0] == device
+            and merged[-1][3] == segment_key
+            and start <= merged[-1][2]
+        ):
+            previous = merged[-1]
+            merged[-1] = (
+                device,
+                previous[1],
+                max(previous[2], end),
+                segment_key,
+                previous[4] | labels,
+            )
+        else:
+            merged.append((device, start, end, segment_key, set(labels)))
+
     return tuple(
         {
             "affected_device_indices": [device],
@@ -1723,8 +1994,80 @@ def postmerge_alignment_warning_intervals(
             "action": "keep_measured_data",
             "evidence": "post-merge QC warning: " + ", ".join(sorted(labels)),
         }
-        for (device, start, end), labels in sorted(intervals.items())
+        for device, start, end, _segment_key, labels in merged
     )
+
+
+def alignment_quality_coverage_failures(
+    alignment_quality_path: Path,
+    result: PostMergeValidationResult,
+    *,
+    device_count: int,
+    master_index: int,
+    n_output_samples: int | None = None,
+    min_peak_to_background: float = 1.2,
+    min_peak_margin_fraction: float = 0.01,
+) -> tuple[str, ...]:
+    """Return invariant failures for reliable bad-lag windows left quality-good."""
+
+    path = Path(alignment_quality_path)
+    sample_count = result.n_output_samples if n_output_samples is None else n_output_samples
+    expected_bytes = sample_count * device_count
+    if device_count < 1 or not 0 <= master_index < device_count:
+        return ("invalid alignment-quality device ordering",)
+    if not path.is_file() or path.stat().st_size != expected_bytes:
+        return (
+            "alignment_quality.dat is missing or has an unexpected size "
+            f"({path.stat().st_size if path.is_file() else 0}/{expected_bytes} bytes)",
+        )
+    validity_order = [
+        master_index,
+        *(index for index in range(device_count) if index != master_index),
+    ]
+    channel_by_device = {
+        device_index + 1: channel
+        for channel, device_index in enumerate(validity_order)
+    }
+    quality = np.memmap(
+        path,
+        dtype=np.uint8,
+        mode="r",
+        shape=(sample_count, device_count),
+        order="C",
+    )
+    failures: list[str] = []
+    try:
+        for measurement in result.measurements:
+            if not _measurement_peak_is_reliable(
+                measurement,
+                min_peak_correlation=result.min_peak_correlation,
+                min_peak_to_background=min_peak_to_background,
+                min_peak_margin_fraction=min_peak_margin_fraction,
+            ):
+                continue
+            if (
+                measurement.lag_samples is None
+                or abs(measurement.lag_samples)
+                <= result.max_allowed_abs_lag_samples
+            ):
+                continue
+            start = max(0, int(measurement.window_start_sample))
+            end = min(sample_count, int(measurement.window_end_sample))
+            channel = channel_by_device.get(measurement.slave_device_index)
+            if channel is None or end <= start:
+                failures.append(
+                    f"{measurement.position} has invalid device/window coordinates"
+                )
+                continue
+            remaining = int(np.count_nonzero(quality[start:end, channel]))
+            if remaining:
+                failures.append(
+                    f"slave {measurement.slave_device_index} {measurement.position} "
+                    f"retains {remaining}/{end - start} alignment-good samples"
+                )
+    finally:
+        close_memmap(quality)
+    return tuple(failures)
 
 
 def postmerge_exclusion_intervals(

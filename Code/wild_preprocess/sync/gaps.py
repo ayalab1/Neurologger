@@ -24,6 +24,9 @@ class AdaptiveChangePoint:
     before_count: int
     after_count: int
     evidence: str
+    sample_localized: bool = False
+    localization_status: str = "unresolved"
+    localization_evidence: str = ""
 
 
 def _reliable_observations(
@@ -570,21 +573,53 @@ def localize_relative_offset_step(
     new_score[~valid] = 0.0
     prefix_old = np.concatenate(([0.0], np.cumsum(old_score)))
     prefix_new = np.concatenate(([0.0], np.cumsum(new_score)))
-    candidate_scores = np.empty(candidates.size, dtype=np.float64)
-    for candidate_index, boundary in enumerate(candidates):
-        split = int(boundary - left)
-        new_start = split + (missing if step.offset_step_samples < 0 else 0)
-        if new_start >= indices.size:
-            candidate_scores[candidate_index] = -np.inf
-            continue
-        candidate_scores[candidate_index] = (
-            prefix_old[split]
-            + prefix_new[-1]
-            - prefix_new[new_start]
-        )
+    splits = candidates - left
+    new_starts = splits + (missing if step.offset_step_samples < 0 else 0)
+    candidate_scores = np.full(candidates.size, -np.inf, dtype=np.float64)
+    supported_candidates = new_starts < indices.size
+    candidate_scores[supported_candidates] = (
+        prefix_old[splits[supported_candidates]]
+        + prefix_new[-1]
+        - prefix_new[new_starts[supported_candidates]]
+    )
     best_index = int(np.argmax(candidate_scores))
-    if not np.isfinite(candidate_scores[best_index]):
+    best_score = float(candidate_scores[best_index])
+    if not np.isfinite(best_score):
         return step
+    # A point estimate is safe only when the objective identifies the join
+    # more precisely than the guard that will be excluded around it.  Flat,
+    # repeated, or overwritten source spans can produce a wide score plateau:
+    # choosing its first argmax would silently map part of that span with the
+    # wrong side of the transition.
+    backward_support = (
+        int(np.ceil(abs(step.offset_step_samples) / 2.0)) + 16
+        if step.offset_step_samples < 0
+        else 16
+    )
+    localization_guard = max(
+        1,
+        int(options.unresolved_boundary_guard_samples),
+        backward_support,
+    )
+    score_tolerance = max(1e-9, abs(best_score) * 1e-12)
+    near_best = candidates[
+        np.isfinite(candidate_scores)
+        & (candidate_scores >= best_score - score_tolerance)
+    ]
+    if (
+        near_best.size == 0
+        or int(near_best[-1]) - int(near_best[0]) > 2 * localization_guard
+    ):
+        return replace(
+            step,
+            confidence="medium",
+            evidence=(
+                f"{step.evidence}; boundary refinement rejected because the "
+                "objective optimum was not unique within the localized guard"
+            ),
+    )
+    best = int(round((int(near_best[0]) + int(near_best[-1])) / 2.0))
+    best_index = int(np.searchsorted(candidates, best))
     edge_margin = max(2, min(100, int(round(0.01 * candidates.size))))
     if best_index < edge_margin or best_index >= candidates.size - edge_margin:
         return replace(
@@ -595,12 +630,189 @@ def localize_relative_offset_step(
                 "was at the search edge"
             ),
         )
-    best = int(candidates[best_index])
+    competing = (
+        np.isfinite(candidate_scores)
+        & (np.abs(candidates - best) > localization_guard)
+    )
+    if np.any(competing):
+        competing_indices = np.flatnonzero(competing)
+        alternate_index = int(
+            competing_indices[np.argmax(candidate_scores[competing_indices])]
+        )
+        alternate_score = float(candidate_scores[alternate_index])
+        alternate_distance = abs(int(candidates[alternate_index]) - best)
+        score_separation_per_sample = (
+            best_score - alternate_score
+        ) / max(1, alternate_distance)
+        if (
+            not np.isfinite(score_separation_per_sample)
+            or score_separation_per_sample < options.min_peak_margin_fraction
+        ):
+            return replace(
+                step,
+                confidence="medium",
+                evidence=(
+                    f"{step.evidence}; boundary refinement rejected because a "
+                    "competing boundary outside the localized guard had "
+                    f"insufficient score separation ({score_separation_per_sample:.4g} per sample)"
+                ),
+            )
     return with_localized_step(
         step,
         best,
         fs,
         f"sample-wise boundary refinement from {approximate} to {best}",
+    )
+
+
+def localize_adaptive_change_point(
+    master_feature: np.ndarray,
+    slave_feature: np.ndarray,
+    point: AdaptiveChangePoint,
+    *,
+    fs: float,
+    options: SyncOptions,
+) -> AdaptiveChangePoint:
+    """Localize one adaptive offset transition against full-rate evidence.
+
+    Adaptive detection establishes stable offset levels on both sides but its
+    reported midpoint is limited by the observation cadence.  Reuse the
+    established piecewise old/new mapping objective to refine that midpoint.
+    Failure deliberately preserves the original midpoint and leaves the broad
+    observation-cadence guard authoritative.
+    """
+
+    rounded_delta = int(round(abs(point.delta_samples)))
+    if rounded_delta <= 0:
+        return replace(
+            point,
+            sample_localized=False,
+            localization_status="unresolved",
+            localization_evidence="sample-wise refinement unavailable for a sub-sample offset change",
+        )
+    step = RelativeOffsetStep(
+        master_sample=int(point.canonical_boundary_sample),
+        time_sec=float(point.time_sec),
+        offset_step_samples=float(point.delta_samples),
+        missing_samples=rounded_delta,
+        offset_before_samples=float(point.before_level_samples),
+        offset_after_samples=float(point.after_level_samples),
+        confidence=point.confidence,
+        evidence=point.evidence,
+    )
+    refined = localize_relative_offset_step(
+        master_feature,
+        slave_feature,
+        step,
+        fs=fs,
+        options=options,
+    )
+    marker = "sample-wise boundary refinement from "
+    localized = marker in refined.evidence
+    probe_samples = max(16, int(round(options.endpoint_probe_seconds * fs)))
+    boundary = int(refined.master_sample if localized else point.canonical_boundary_sample)
+    if localized:
+        after_start = boundary + (rounded_delta if point.delta_samples < 0 else 0)
+        starts = (
+            boundary - 2 * probe_samples,
+            boundary - probe_samples,
+            after_start,
+            after_start + probe_samples,
+        )
+    else:
+        cadence_guard = max(1, int(round(options.step_seconds * fs)))
+        starts = (
+            boundary - cadence_guard - 2 * probe_samples,
+            boundary - cadence_guard - probe_samples,
+            boundary + cadence_guard,
+            boundary + cadence_guard + probe_samples,
+        )
+
+    def fixed_correlation(start: int, offset: float) -> float:
+        end = start + probe_samples
+        slave_start = start + int(round(offset))
+        slave_end = slave_start + probe_samples
+        if start < 0 or end > master_feature.size or slave_start < 0 or slave_end > slave_feature.size:
+            return float("nan")
+        master_values = np.asarray(master_feature[start:end], dtype=np.float64)
+        slave_values = np.asarray(slave_feature[slave_start:slave_end], dtype=np.float64)
+        master_values -= float(np.mean(master_values))
+        slave_values -= float(np.mean(slave_values))
+        denominator = float(np.linalg.norm(master_values) * np.linalg.norm(slave_values))
+        if not np.isfinite(denominator) or denominator <= np.finfo(float).eps:
+            return float("nan")
+        return float(np.dot(master_values, slave_values) / denominator)
+
+    preferences: list[str] = []
+    correlation_evidence: list[str] = []
+    for start in starts:
+        old_correlation = fixed_correlation(start, point.before_level_samples)
+        new_correlation = fixed_correlation(start, point.after_level_samples)
+        winner = max(old_correlation, new_correlation)
+        margin = (
+            abs(old_correlation - new_correlation) / max(abs(winner), np.finfo(float).eps)
+            if np.isfinite(old_correlation) and np.isfinite(new_correlation)
+            else 0.0
+        )
+        if (
+            np.isfinite(winner)
+            and winner >= options.min_peak_correlation
+            and margin >= options.min_peak_margin_fraction
+        ):
+            preferences.append("old" if old_correlation > new_correlation else "new")
+        else:
+            preferences.append("ambiguous")
+        correlation_evidence.append(
+            f"{start}:{old_correlation:.3f}/{new_correlation:.3f}/{margin:.3f}"
+        )
+
+    expected_transition = preferences[:2] == ["old", "old"] and preferences[2:] == ["new", "new"]
+    verified_alias = preferences == ["old", "old", "old", "old"]
+    probe_evidence = (
+        "two-window old/new preferences "
+        + ", ".join(preferences)
+        + "; old/new/margin "
+        + ", ".join(correlation_evidence)
+    )
+    if not localized and verified_alias:
+        return replace(
+            point,
+            sample_localized=False,
+            localization_status="verified_alias",
+            localization_evidence=probe_evidence,
+            evidence=f"{point.evidence}; adaptive transition rejected as a verified full-rate alias; {probe_evidence}",
+        )
+    if not localized:
+        suffix = refined.evidence[len(point.evidence) :].lstrip("; ")
+        return replace(
+            point,
+            sample_localized=False,
+            localization_status="unresolved",
+            localization_evidence=(
+                (suffix or "sample-wise boundary refinement unavailable")
+                + "; "
+                + probe_evidence
+            ),
+        )
+    if not expected_transition:
+        return replace(
+            point,
+            sample_localized=False,
+            localization_status="unresolved",
+            localization_evidence=(
+                "sample-wise optimum lacked two independent mapping-preference windows; "
+                + probe_evidence
+            ),
+        )
+    suffix = refined.evidence[len(point.evidence) :].lstrip("; ")
+    return replace(
+        point,
+        canonical_boundary_sample=int(refined.master_sample),
+        time_sec=float(refined.master_sample / fs),
+        sample_localized=True,
+        localization_status="localized",
+        localization_evidence=f"{suffix}; {probe_evidence}",
+        evidence=f"{refined.evidence}; {probe_evidence}",
     )
 
 

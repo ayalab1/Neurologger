@@ -16,7 +16,7 @@ if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
 from wild_preprocess.models import SyncOptions
-from wild_preprocess.pipeline import run_multidevice_sync
+from wild_preprocess.pipeline import _postmerge_lag_limit_samples, run_multidevice_sync
 from wild_preprocess.version import RUN_MANIFEST_SCHEMA_VERSION
 
 
@@ -37,6 +37,20 @@ def _write_recording(folder: Path, values: np.ndarray, *, fs: int) -> None:
 
 
 class PipelineTimingTest(unittest.TestCase):
+    def test_postmerge_tolerance_uses_milliseconds_without_weakening_legacy_floor(self) -> None:
+        self.assertEqual(_postmerge_lag_limit_samples(SyncOptions(), 20_000), 20)
+        self.assertEqual(_postmerge_lag_limit_samples(SyncOptions(), 1_000), 4)
+        self.assertEqual(
+            _postmerge_lag_limit_samples(
+                SyncOptions(
+                    postmerge_max_residual_lag_samples=4,
+                    postmerge_max_residual_lag_ms=2.5,
+                ),
+                20_000,
+            ),
+            50,
+        )
+
     def _case(self, root: Path) -> tuple[list[Path], SyncOptions]:
         fs = 20_000
         rng = np.random.default_rng(103)

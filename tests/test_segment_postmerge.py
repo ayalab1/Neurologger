@@ -19,6 +19,7 @@ from wild_preprocess.sync.observe import LagEstimate
 from wild_preprocess.sync.postmerge import (
     PostMergeMeasurement,
     PostMergeValidationResult,
+    alignment_quality_coverage_failures,
     apply_postmerge_segment_corrections,
     infer_postmerge_segment_corrections,
     postmerge_alignment_warning_intervals,
@@ -27,7 +28,9 @@ from wild_preprocess.sync.postmerge import (
 )
 
 
-def _recording(index: int, *, n_samples: int = 10_000) -> Recording:
+def _recording(
+    index: int, *, n_samples: int = 10_000, fs: int = 1_000
+) -> Recording:
     folder = Path(f"device-{index}")
     return Recording(
         folder=folder,
@@ -36,7 +39,7 @@ def _recording(index: int, *, n_samples: int = 10_000) -> Recording:
         ce_params_file=folder / "CE_params.bin",
         device_name=folder.name,
         recording_name="recording",
-        fs=1_000,
+        fs=fs,
         n_channels=2,
         n_samples=n_samples,
         analog_channels=1,
@@ -63,13 +66,18 @@ def _segment(device_index: int, start: int, end: int) -> DeviceSyncSegment:
     )
 
 
-def _staged(path: Path, *, n_samples: int = 10_000) -> list[Recording]:
+def _staged(
+    path: Path, *, n_samples: int = 10_000, fs: int = 1_000
+) -> list[Recording]:
     rng = np.random.default_rng(22)
     common = rng.normal(scale=600, size=n_samples)
     master = np.column_stack((common, common + 13))
     slave = np.column_stack((common, common + 17))
     np.rint(np.column_stack((master, slave))).astype("<i2").tofile(path)
-    return [_recording(1, n_samples=n_samples), _recording(2, n_samples=n_samples)]
+    return [
+        _recording(1, n_samples=n_samples, fs=fs),
+        _recording(2, n_samples=n_samples, fs=fs),
+    ]
 
 
 class SegmentPostMergeTest(unittest.TestCase):
@@ -319,13 +327,438 @@ class SegmentPostMergeTest(unittest.TestCase):
             )
             self.assertEqual(len(warnings), 1)
             self.assertEqual(warnings[0]["affected_device_indices"], [2])
-            self.assertEqual(
-                (
-                    warnings[0]["canonical_start_sample"],
-                    warnings[0]["canonical_end_sample"],
-                ),
-                (failed.window_start_sample, failed.window_end_sample),
+            self.assertLessEqual(
+                warnings[0]["canonical_start_sample"], failed.window_start_sample
             )
+            self.assertGreaterEqual(
+                warnings[0]["canonical_end_sample"], failed.window_end_sample
+            )
+
+    @staticmethod
+    def _postmerge_measurement(
+        position: str,
+        sample: int,
+        state: str,
+        *,
+        segment_start: int = 0,
+        segment_end: int = 10_000,
+        device_index: int = 2,
+    ) -> PostMergeMeasurement:
+        if state == "pass":
+            lag, correlation, background, margin, passed = 0, 0.8, 10.0, 0.5, True
+        elif state == "fail":
+            lag, correlation, background, margin, passed = 5, 0.8, 10.0, 0.5, False
+        elif state == "ambiguous":
+            lag, correlation, background, margin, passed = 50, 0.01, 1.01, 0.001, False
+        else:
+            raise ValueError(state)
+        return PostMergeMeasurement(
+            position=position,
+            fraction=sample / 10_000,
+            nominal_output_sample=sample,
+            window_start_sample=sample - 100,
+            window_end_sample=sample + 100,
+            slave_device_index=device_index,
+            lag_samples=lag,
+            peak_correlation=correlation,
+            peak_to_background=background,
+            peak_margin_fraction=margin,
+            passed=passed,
+            message=state,
+            exclusion_device_indices=(device_index,),
+            segment_canonical_start_sample=segment_start,
+            segment_canonical_end_sample=segment_end,
+        )
+
+    @classmethod
+    def _postmerge_result(
+        cls, states: tuple[str, ...]
+    ) -> PostMergeValidationResult:
+        measurements = tuple(
+            cls._postmerge_measurement(f"window{index}", index * 1_000, state)
+            for index, state in enumerate(states, start=1)
+        )
+        return PostMergeValidationResult(
+            "WARN",
+            "synthetic",
+            "stage/amplifier.dat",
+            1,
+            10_000,
+            4,
+            200,
+            4,
+            0.05,
+            max(abs(item.lag_samples or 0) for item in measurements),
+            measurements,
+        )
+
+    def test_reliable_failure_stays_closed_until_two_recovery_passes(self) -> None:
+        result = self._postmerge_result(("pass", "pass", "fail", "pass", "pass"))
+
+        warnings = postmerge_alignment_warning_intervals(
+            result,
+            canonical_start_sample=0,
+            minimum_continuous_failure_windows=1,
+        )
+
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(
+            (
+                warnings[0]["canonical_start_sample"],
+                warnings[0]["canonical_end_sample"],
+            ),
+            (2_100, 4_900),
+        )
+
+    def test_one_pass_between_failures_keeps_both_failures_local(self) -> None:
+        result = self._postmerge_result(
+            ("pass", "pass", "fail", "pass", "fail", "pass", "pass")
+        )
+
+        warnings = postmerge_alignment_warning_intervals(
+            result, canonical_start_sample=0
+        )
+
+        self.assertEqual(len(warnings), 2)
+        self.assertEqual(
+            [
+                (
+                    warning["canonical_start_sample"],
+                    warning["canonical_end_sample"],
+                )
+                for warning in warnings
+            ],
+            [(2_900, 3_100), (4_900, 5_100)],
+        )
+
+    def test_consecutive_reliable_failures_create_continuous_warning(self) -> None:
+        result = self._postmerge_result(
+            ("pass", "pass", "fail", "fail", "pass", "pass")
+        )
+
+        warnings = postmerge_alignment_warning_intervals(
+            result, canonical_start_sample=0
+        )
+
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(
+            (
+                warnings[0]["canonical_start_sample"],
+                warnings[0]["canonical_end_sample"],
+            ),
+            (2_100, 5_900),
+        )
+
+    def test_ambiguous_window_between_failures_does_not_split_hard_run(self) -> None:
+        result = self._postmerge_result(
+            ("pass", "pass", "fail", "ambiguous", "fail", "pass", "pass")
+        )
+
+        warnings = postmerge_alignment_warning_intervals(
+            result, canonical_start_sample=0
+        )
+
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(
+            (
+                warnings[0]["canonical_start_sample"],
+                warnings[0]["canonical_end_sample"],
+            ),
+            (2_100, 6_900),
+        )
+
+    def test_overlapping_hard_failures_count_as_one_local_observation(self) -> None:
+        measurements = (
+            self._postmerge_measurement("failure1", 1_000, "fail"),
+            self._postmerge_measurement("failure2", 1_050, "fail"),
+        )
+        result = PostMergeValidationResult(
+            "WARN", "synthetic", "stage/amplifier.dat", 1, 10_000, 4,
+            200, 4, 0.05, 5.0, measurements,
+        )
+
+        warnings = postmerge_alignment_warning_intervals(
+            result, canonical_start_sample=0
+        )
+
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(
+            (
+                warnings[0]["canonical_start_sample"],
+                warnings[0]["canonical_end_sample"],
+            ),
+            (900, 1_150),
+        )
+
+    def test_hard_failures_in_adjacent_segments_do_not_form_a_run(self) -> None:
+        measurements = (
+            self._postmerge_measurement(
+                "first", 1_900, "fail", segment_start=0, segment_end=4_000
+            ),
+            self._postmerge_measurement(
+                "second", 4_100, "fail", segment_start=4_000, segment_end=8_000
+            ),
+        )
+        result = PostMergeValidationResult(
+            "WARN", "synthetic", "stage/amplifier.dat", 1, 10_000, 4,
+            200, 4, 0.05, 5.0, measurements,
+        )
+
+        warnings = postmerge_alignment_warning_intervals(
+            result, canonical_start_sample=0
+        )
+
+        self.assertEqual(len(warnings), 2)
+        self.assertEqual(
+            [
+                (
+                    warning["canonical_start_sample"],
+                    warning["canonical_end_sample"],
+                )
+                for warning in warnings
+            ],
+            [(1_800, 2_000), (4_000, 4_200)],
+        )
+
+    def test_overlapping_pass_windows_count_as_one_recovery_observation(self) -> None:
+        measurements = (
+            self._postmerge_measurement("failure", 1_000, "fail"),
+            self._postmerge_measurement("pass1", 2_000, "pass"),
+            self._postmerge_measurement("pass2_overlap", 2_050, "pass"),
+        )
+        result = PostMergeValidationResult(
+            "WARN", "synthetic", "stage/amplifier.dat", 1, 10_000, 4,
+            200, 4, 0.05, 5.0, measurements,
+        )
+
+        warnings = postmerge_alignment_warning_intervals(
+            result,
+            canonical_start_sample=0,
+            minimum_continuous_failure_windows=1,
+        )
+
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0]["canonical_end_sample"], 10_000)
+
+    def test_ambiguous_window_does_not_block_two_reliable_recovery_passes(self) -> None:
+        result = self._postmerge_result(
+            ("pass", "pass", "fail", "pass", "ambiguous", "pass")
+        )
+
+        warnings = postmerge_alignment_warning_intervals(
+            result,
+            canonical_start_sample=0,
+            minimum_continuous_failure_windows=1,
+        )
+
+        self.assertEqual(len(warnings), 1)
+        continuous = warnings[0]
+        self.assertEqual(
+            (
+                continuous["canonical_start_sample"],
+                continuous["canonical_end_sample"],
+            ),
+            (2_100, 5_900),
+        )
+
+    def test_unrecovered_terminal_failure_extends_to_segment_end(self) -> None:
+        result = self._postmerge_result(("pass", "pass", "fail", "pass"))
+
+        warnings = postmerge_alignment_warning_intervals(
+            result,
+            canonical_start_sample=0,
+            minimum_continuous_failure_windows=1,
+        )
+
+        self.assertEqual(
+            warnings[0]["canonical_end_sample"], 10_000
+        )
+
+    def test_failure_without_leading_pass_pair_starts_at_segment_boundary(self) -> None:
+        result = self._postmerge_result(("fail", "pass", "pass"))
+
+        warnings = postmerge_alignment_warning_intervals(
+            result,
+            canonical_start_sample=0,
+            minimum_continuous_failure_windows=1,
+        )
+
+        self.assertEqual(warnings[0]["canonical_start_sample"], 0)
+        self.assertEqual(warnings[0]["canonical_end_sample"], 2_900)
+
+    def test_recovery_evidence_is_not_shared_across_segments(self) -> None:
+        first = (
+            self._postmerge_measurement(
+                "first_fail", 2_000, "fail", segment_start=0, segment_end=4_000
+            ),
+            self._postmerge_measurement(
+                "first_pass", 3_000, "pass", segment_start=0, segment_end=4_000
+            ),
+        )
+        second = (
+            self._postmerge_measurement(
+                "second_pass1", 4_500, "pass", segment_start=4_000, segment_end=8_000
+            ),
+            self._postmerge_measurement(
+                "second_pass2", 5_500, "pass", segment_start=4_000, segment_end=8_000
+            ),
+        )
+        result = PostMergeValidationResult(
+            "WARN", "synthetic", "stage/amplifier.dat", 1, 10_000, 4,
+            200, 4, 0.05, 5.0, first + second,
+        )
+
+        warnings = postmerge_alignment_warning_intervals(
+            result,
+            canonical_start_sample=0,
+            minimum_continuous_failure_windows=1,
+        )
+
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(
+            (
+                warnings[0]["canonical_start_sample"],
+                warnings[0]["canonical_end_sample"],
+            ),
+            (0, 4_000),
+        )
+
+    def test_warning_state_is_not_shared_across_slave_devices(self) -> None:
+        measurements = (
+            self._postmerge_measurement("slave2_fail", 2_000, "fail", device_index=2),
+            self._postmerge_measurement("slave3_fail", 7_000, "fail", device_index=3),
+        )
+        result = PostMergeValidationResult(
+            "WARN", "synthetic", "stage/amplifier.dat", 1, 10_000, 6,
+            200, 4, 0.05, 5.0, measurements,
+        )
+
+        warnings = postmerge_alignment_warning_intervals(
+            result, canonical_start_sample=0
+        )
+
+        self.assertEqual(len(warnings), 2)
+        self.assertEqual(
+            [item["affected_device_indices"] for item in warnings], [[2], [3]]
+        )
+
+    def test_ambiguous_failure_is_diagnostic_only_by_default(self) -> None:
+        result = self._postmerge_result(("pass", "ambiguous", "pass"))
+
+        warnings = postmerge_alignment_warning_intervals(
+            result, canonical_start_sample=0
+        )
+
+        self.assertFalse(warnings)
+
+    def test_ambiguous_failure_can_be_requested_as_window_local(self) -> None:
+        result = self._postmerge_result(("pass", "ambiguous", "pass"))
+
+        warnings = postmerge_alignment_warning_intervals(
+            result, canonical_start_sample=0, mask_unreliable_windows=True
+        )
+
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(
+            (
+                warnings[0]["canonical_start_sample"],
+                warnings[0]["canonical_end_sample"],
+            ),
+            (1_900, 2_100),
+        )
+
+    def test_single_reliable_failure_remains_window_local_by_default(self) -> None:
+        result = self._postmerge_result(("pass", "pass", "fail", "pass", "pass"))
+
+        warnings = postmerge_alignment_warning_intervals(
+            result, canonical_start_sample=0
+        )
+
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(
+            (
+                warnings[0]["canonical_start_sample"],
+                warnings[0]["canonical_end_sample"],
+            ),
+            (2_900, 3_100),
+        )
+
+    def test_alignment_quality_gate_rejects_uncovered_reliable_failure(self) -> None:
+        result = self._postmerge_result(("fail",))
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "alignment_quality.dat"
+            quality = np.ones((10_000, 2), dtype=np.uint8)
+            quality.tofile(path)
+
+            uncovered = alignment_quality_coverage_failures(
+                path, result, device_count=2, master_index=0
+            )
+            quality[900:1_100, 1] = 0
+            quality.tofile(path)
+            covered = alignment_quality_coverage_failures(
+                path, result, device_count=2, master_index=0
+            )
+
+        self.assertEqual(len(uncovered), 1)
+        self.assertIn("retains 200/200", uncovered[0])
+        self.assertFalse(covered)
+
+    def test_alignment_quality_gate_ignores_ambiguous_large_lag(self) -> None:
+        result = self._postmerge_result(("ambiguous",))
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "alignment_quality.dat"
+            np.ones((10_000, 2), dtype=np.uint8).tofile(path)
+            failures = alignment_quality_coverage_failures(
+                path, result, device_count=2, master_index=0
+            )
+
+        self.assertFalse(failures)
+
+    def test_twenty_khz_one_millisecond_lag_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            amplifier = root / "amplifier.dat"
+            validity_path = root / "valid_samples.dat"
+            recordings = _staged(amplifier, fs=20_000)
+            np.ones((10_000, 2), dtype=np.uint8).tofile(validity_path)
+            segment_group = [_segment(1, 0, 10_000), _segment(2, 0, 10_000)]
+            accepted = LagEstimate(
+                20, 0.8, 10.0, 0.5, None, np.array([20]), np.array([0.8])
+            )
+            rejected = LagEstimate(
+                21, 0.8, 10.0, 0.5, None, np.array([21]), np.array([0.8])
+            )
+            with patch(
+                "wild_preprocess.sync.postmerge.estimate_lag",
+                return_value=accepted,
+            ):
+                at_limit = validate_segment_staged_merge(
+                    amplifier,
+                    recordings,
+                    0,
+                    device_segments=segment_group,
+                    validity_path=validity_path,
+                    window_seconds=0.01,
+                    max_lag_samples=30,
+                    max_allowed_abs_lag_samples=20,
+                )
+            with patch(
+                "wild_preprocess.sync.postmerge.estimate_lag",
+                return_value=rejected,
+            ):
+                above_limit = validate_segment_staged_merge(
+                    amplifier,
+                    recordings,
+                    0,
+                    device_segments=segment_group,
+                    validity_path=validity_path,
+                    window_seconds=0.01,
+                    max_lag_samples=30,
+                    max_allowed_abs_lag_samples=20,
+                )
+
+        self.assertEqual(at_limit.status, "OK")
+        self.assertEqual(above_limit.status, "WARN")
 
     def test_repeated_consistent_lag_corrects_intercept_without_extrapolation(self) -> None:
         measurements = tuple(

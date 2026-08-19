@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from threading import Lock
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Sequence
 
 from .binary_io import close_memmap, read_ce_params_metadata, recordings_from_folders
 from .audit import RawAuditOptions, scan_exact_duplications
@@ -53,12 +53,14 @@ from .models import (
 from .report import save_pair_figure
 from .sync.features import build_raw_evidence_scan, feature_memmap
 from .sync.gaps import (
+    AdaptiveChangePoint,
     canonicalize_master_sample,
     detect_isolated_offset_crop,
     detect_unconfirmed_terminal_crop,
     detect_adaptive_change_points,
     gap_summary,
     infer_device_gaps,
+    localize_adaptive_change_point,
     localize_relative_offset_step,
     verify_isolated_offset_alias,
 )
@@ -68,6 +70,7 @@ from .sync.infer import (
     fit_independent_device_segments,
 )
 from .sync.merge import (
+    EPHYS_SINC_HALF_WIDTH,
     _recover_interrupted_transactions,
     merge_recordings,
     rewrite_staged_ephys_from_segments,
@@ -82,6 +85,7 @@ from .sync.attribution import (
 )
 from .sync.postmerge import (
     PostMergeValidationResult,
+    alignment_quality_coverage_failures,
     apply_postmerge_segment_corrections,
     infer_postmerge_segment_corrections,
     postmerge_alignment_warning_intervals,
@@ -106,6 +110,24 @@ from .pc_time import (
 )
 
 
+def _postmerge_lag_limit_samples(options: SyncOptions, fs: int) -> int:
+    """Convert the analysis-facing millisecond tolerance to sample support."""
+
+    if fs <= 0:
+        raise ValueError("post-merge lag tolerance requires a positive sample rate")
+    if int(options.postmerge_max_residual_lag_samples) < 0:
+        raise ValueError("postmerge_max_residual_lag_samples must be non-negative")
+    if (
+        not math.isfinite(options.postmerge_max_residual_lag_ms)
+        or options.postmerge_max_residual_lag_ms < 0
+    ):
+        raise ValueError("postmerge_max_residual_lag_ms must be finite and non-negative")
+    return max(
+        int(options.postmerge_max_residual_lag_samples),
+        int(math.ceil(options.postmerge_max_residual_lag_ms * fs / 1_000.0)),
+    )
+
+
 def _unlocalized_adaptive_half_window_samples(
     options: SyncOptions, sample_rate_hz: float
 ) -> int:
@@ -120,6 +142,24 @@ def _unlocalized_adaptive_half_window_samples(
         # steps when one observation is rejected. Their midpoint therefore
         # has up to one full step of timing uncertainty on either side.
         int(np.ceil(options.step_seconds * sample_rate_hz)),
+    )
+
+
+def _localized_adaptive_half_guard_samples(
+    delta_samples: float,
+    options: SyncOptions,
+) -> int:
+    """Bound a localized join without permitting backward source reuse."""
+
+    backward_support = (
+        int(math.ceil(abs(delta_samples) / 2.0)) + EPHYS_SINC_HALF_WIDTH
+        if delta_samples < 0
+        else EPHYS_SINC_HALF_WIDTH
+    )
+    return max(
+        1,
+        int(options.unresolved_boundary_guard_samples),
+        backward_support,
     )
 
 
@@ -457,6 +497,7 @@ def _pair_device_segments(
     canonicalize: Callable[[int], int],
     canonical_end_sample: int,
     invalid_ranges: list[tuple[int, int]],
+    adaptive_points: Sequence[AdaptiveChangePoint] | None = None,
 ) -> tuple[DeviceSyncSegment, ...]:
     """Fit each supported slave interval from its own verified anchors."""
 
@@ -473,7 +514,11 @@ def _pair_device_segments(
         )
         for anchor in raw_anchors
     )
-    adaptive = detect_adaptive_change_points(pair.observations, fs, options)
+    adaptive = tuple(
+        detect_adaptive_change_points(pair.observations, fs, options)
+        if adaptive_points is None
+        else adaptive_points
+    )
     boundaries = tuple(canonicalize(point.canonical_boundary_sample) for point in adaptive)
     start = max(0, canonicalize(int(pair.validated_start_master_sample)))
     reliable = [item for item in pair.observations if item.accepted]
@@ -494,11 +539,27 @@ def _pair_device_segments(
     end = min(canonical_end_sample, supported_end)
     if end <= start:
         return ()
-    adaptive_guard = max(1, int(round(options.window_seconds * fs / 2.0)))
     guarded_changes = [
         (
-            canonicalize(max(0, point.canonical_boundary_sample - adaptive_guard)),
-            canonicalize(point.canonical_boundary_sample + adaptive_guard),
+            canonicalize(
+                max(
+                    0,
+                    point.canonical_boundary_sample
+                    - (
+                        _localized_adaptive_half_guard_samples(point.delta_samples, options)
+                        if point.sample_localized
+                        else _unlocalized_adaptive_half_window_samples(options, fs)
+                    ),
+                )
+            ),
+            canonicalize(
+                point.canonical_boundary_sample
+                + (
+                    _localized_adaptive_half_guard_samples(point.delta_samples, options)
+                    if point.sample_localized
+                    else _unlocalized_adaptive_half_window_samples(options, fs)
+                )
+            ),
         )
         for point in adaptive
     ]
@@ -717,6 +778,16 @@ def run_multidevice_sync(
     """
 
     options = options or SyncOptions()
+    if options.postmerge_recovery_pass_windows < 2:
+        raise ValueError(
+            "postmerge_recovery_pass_windows must be at least two"
+        )
+    if options.postmerge_min_continuous_failure_windows < 2:
+        raise ValueError(
+            "postmerge_min_continuous_failure_windows must be at least two"
+        )
+    if not isinstance(options.postmerge_mask_unreliable_windows, bool):
+        raise ValueError("postmerge_mask_unreliable_windows must be a boolean")
     pc_time_options = pc_time_options or PcTimeOptions()
     performance = _PerformanceTracker()
     if validate_postmerge is None:
@@ -782,6 +853,7 @@ def run_multidevice_sync(
     attempt_folder.mkdir(parents=True, exist_ok=False)
 
     pairs: list[SyncPairResult] = []
+    adaptive_points_by_slave: dict[int, tuple[AdaptiveChangePoint, ...]] = {}
     cache_root_text = os.environ.get("WILD_SYNC_CACHE_DIR", "").strip()
     cache_root = Path(cache_root_text).expanduser().resolve() if cache_root_text else None
     if cache_root is not None:
@@ -1111,6 +1183,29 @@ def run_multidevice_sync(
                     options=options,
                     offset_steps=validated_steps,
                 )
+            adaptive_points = detect_adaptive_change_points(
+                validation_observations,
+                master.fs,
+                options,
+            )
+            if adaptive_points:
+                master_feature = feature_memmap(feature_paths[master_index], master.n_samples)
+                slave_feature = feature_memmap(feature_paths[slave_index], slave.n_samples)
+                try:
+                    adaptive_points = tuple(
+                        localize_adaptive_change_point(
+                            master_feature,
+                            slave_feature,
+                            point,
+                            fs=master.fs,
+                            options=options,
+                        )
+                        for point in adaptive_points
+                    )
+                finally:
+                    close_memmap(master_feature)
+                    close_memmap(slave_feature)
+            adaptive_points_by_slave[slave_index + 1] = tuple(adaptive_points)
             status, message = validate_pair(
                 observed.initial,
                 validation_observations,
@@ -1197,12 +1292,12 @@ def run_multidevice_sync(
                     canonical_sample=point.canonical_boundary_sample,
                     delta_samples=int(round(point.delta_samples)),
                     evidence=point.evidence,
+                    boundary_localized=point.sample_localized,
                 )
                 for pair in pairs
-                for point in detect_adaptive_change_points(
-                    pair.observations, master.fs, options
-                )
+                for point in adaptive_points_by_slave.get(pair.slave_index, ())
                 if int(round(point.delta_samples)) != 0
+                and point.localization_status != "verified_alias"
             ]
             # Sliding observation windows can report the same already-localized
             # gap at several later centers.  Targeted attribution is only for
@@ -1261,6 +1356,9 @@ def run_multidevice_sync(
                     ),
                     magnitude_tolerance_samples=max(
                         1, int(round(options.gap_level_tolerance_samples))
+                    ),
+                    localized_boundary_tolerance_samples=max(
+                        1, int(options.unresolved_boundary_guard_samples)
                     ),
                 )
             )
@@ -1329,24 +1427,76 @@ def run_multidevice_sync(
     # Adaptive changes are located only between adjacent observation centers,
     # unlike persistent offset steps refined against raw samples. Preserve the
     # full half-cadence timing uncertainty until a sample-wise boundary exists.
-    adaptive_half_window = _unlocalized_adaptive_half_window_samples(
-        options, master.fs
-    )
+    adaptive_half_window = _unlocalized_adaptive_half_window_samples(options, master.fs)
     unresolved_boundaries.extend(
         UnresolvedBoundary(
             canonical_start_sample=canonicalize(
-                max(0, decision.canonical_sample - adaptive_half_window)
+                max(
+                    0,
+                    decision.canonical_sample
+                    - (
+                        _localized_adaptive_half_guard_samples(
+                            decision.delta_samples,
+                            options,
+                        )
+                        if decision.boundary_localized
+                        else adaptive_half_window
+                    ),
+                )
             ),
             canonical_end_sample=canonicalize(
-                decision.canonical_sample + adaptive_half_window + 1
+                decision.canonical_sample
+                + (
+                    _localized_adaptive_half_guard_samples(
+                        decision.delta_samples,
+                        options,
+                    )
+                    if decision.boundary_localized
+                    else adaptive_half_window
+                )
+                + 1
             ),
             pair_slave_indices=decision.device_indices,
-            evidence=decision.evidence,
+            evidence=(
+                decision.evidence
+                + (
+                    "; sample-wise localized adaptive boundary"
+                    if decision.boundary_localized
+                    else "; adaptive boundary remains observation-cadence limited"
+                )
+            ),
         )
         for decision in targeted_decisions
-        if decision.kind == "unresolved"
-        and canonicalize(decision.canonical_sample + adaptive_half_window + 1)
-        > canonicalize(max(0, decision.canonical_sample - adaptive_half_window))
+        if (
+            decision.kind == "unresolved"
+            or (decision.kind == "master" and not decision.boundary_localized)
+        )
+        and canonicalize(
+            decision.canonical_sample
+            + (
+                _localized_adaptive_half_guard_samples(
+                    decision.delta_samples,
+                    options,
+                )
+                if decision.boundary_localized
+                else adaptive_half_window
+            )
+            + 1
+        )
+        > canonicalize(
+            max(
+                0,
+                decision.canonical_sample
+                - (
+                    _localized_adaptive_half_guard_samples(
+                        decision.delta_samples,
+                        options,
+                    )
+                    if decision.boundary_localized
+                    else adaptive_half_window
+                ),
+            )
+        )
     )
     unresolved_boundaries.sort(
         key=lambda boundary: (
@@ -1404,6 +1554,7 @@ def run_multidevice_sync(
                 canonicalize=canonicalize,
                 canonical_end_sample=canonical_end_sample,
                 invalid_ranges=invalid_ranges,
+                adaptive_points=adaptive_points_by_slave.get(pair.slave_index, ()),
             )
         )
     performance.end("attribution_segment_construction")
@@ -1613,6 +1764,7 @@ def run_multidevice_sync(
                 "device_indices": list(decision.device_indices),
                 "delta_samples": decision.delta_samples,
                 "evidence": decision.evidence,
+                "boundary_localized": decision.boundary_localized,
             }
             for decision in targeted_decisions
         ],
@@ -1773,6 +1925,10 @@ def run_multidevice_sync(
         if progress is not None:
             progress("postmerge_qc", 0.0)
         if validate_postmerge:
+            postmerge_lag_limit_samples = _postmerge_lag_limit_samples(
+                options, recordings[master_index].fs
+            )
+
             def validate_current_stage(
                 *, structural_only: bool = False
             ) -> PostMergeValidationResult:
@@ -1787,7 +1943,7 @@ def run_multidevice_sync(
                     window_seconds=10.0,
                     max_lag_samples=options.tracking_max_lag_samples,
                     max_allowed_abs_lag_samples=(
-                        options.postmerge_max_residual_lag_samples
+                        postmerge_lag_limit_samples
                     ),
                     min_peak_correlation=options.min_peak_correlation,
                     min_peak_to_background=options.min_peak_to_background,
@@ -1851,10 +2007,18 @@ def run_multidevice_sync(
                 alignment_warning_intervals = postmerge_alignment_warning_intervals(
                     postmerge,
                     canonical_start_sample=int(merge_info["common_start_master_sample"]),
+                    min_peak_to_background=options.min_peak_to_background,
+                    min_peak_margin_fraction=options.min_peak_margin_fraction,
+                    recovery_pass_windows=options.postmerge_recovery_pass_windows,
+                    minimum_continuous_failure_windows=(
+                        options.postmerge_min_continuous_failure_windows
+                    ),
+                    mask_unreliable_windows=options.postmerge_mask_unreliable_windows,
                 )
+                alignment_quality_path = staging / "alignment_quality.dat"
                 alignment_summary = write_alignment_quality(
                     Path(staged_outputs["validity"]),
-                    staging / "alignment_quality.dat",
+                    alignment_quality_path,
                     n_samples=int(merge_info["n_samples"]),
                     device_count=len(recordings),
                     master_index=master_index,
@@ -1863,6 +2027,24 @@ def run_multidevice_sync(
                     ),
                     warning_intervals=alignment_warning_intervals,
                 )
+                uncovered_failures = alignment_quality_coverage_failures(
+                    alignment_quality_path,
+                    postmerge,
+                    device_count=len(recordings),
+                    master_index=master_index,
+                    n_output_samples=int(merge_info["n_samples"]),
+                    min_peak_to_background=options.min_peak_to_background,
+                    min_peak_margin_fraction=options.min_peak_margin_fraction,
+                )
+                if uncovered_failures:
+                    postmerge = replace(
+                        postmerge,
+                        status="FAIL",
+                        message=(
+                            "alignment-quality coverage invariant failed: "
+                            + "; ".join(uncovered_failures)
+                        ),
+                    )
                 merge_info.update(
                     {
                         "alignment_quality_samples_file": "alignment_quality.dat",
@@ -2396,6 +2578,11 @@ def run_multidevice_sync(
                 sample_rate_hz=recordings[master_index].fs,
                 pairs=result.pairs,
                 valid_samples_path=Path(staged_outputs["validity"]),
+                alignment_quality_path=(
+                    staging / "alignment_quality.dat"
+                    if (staging / "alignment_quality.dat").is_file()
+                    else None
+                ),
                 n_canonical_samples=int(merge_info["n_samples"]),
                 canonical_start_master_sample=int(merge_info["common_start_master_sample"]),
                 device_count=len(recordings),
@@ -2452,6 +2639,11 @@ def run_multidevice_sync(
                     else component["overall_status"]
                 ),
                 residual_tolerance_samples=options.max_model_residual_samples,
+                alignment_tolerance_samples=(
+                    postmerge.max_allowed_abs_lag_samples
+                    if postmerge is not None
+                    else None
+                ),
                 master_gaps=[
                     gap for gap in result.device_gaps if gap.device_index == master_index + 1
                 ],
