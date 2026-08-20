@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.139",
-  "url": "https://github.com/ayalab1/Neurologger/raw/main/Software/wild_console_Setup_3.4.2.139.exe",
-  "sha256": "D6923B63DBC8E406BEA202E328EA850F1496AD6FCC984A39F4077276D6C006DA",
-  "notes": "Adds V7 CE64 advertisement support while retaining V2-V6 parsing, including alternating 24-bit elapsed-time and AUX/MCU temperature pages."
+  "version": "3.4.2.140",
+  "url": "https://github.com/ayalab1/Neurologger/raw/main/Software/wild_console_Setup_3.4.2.140.exe",
+  "sha256": "38B5EE0092A426AE1E8644610100374F6CFBAAFCFF01D1DE06A3B0C1918AF300",
+  "notes": "Adds V7 CE64 advertisement support while retaining V2-V6 parsing, and bundles the four current FM55 V4 fused firmware HEX images under the Wild Console installation firmware folder."
 }
