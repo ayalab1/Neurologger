@@ -91,6 +91,16 @@ class CeParamsHint:
     recording_date: str | None = None
 
 
+def ce_recording_start_issue(hint: CeParamsHint) -> str | None:
+    """Return why a CE RTC value is not a trustworthy start anchor."""
+
+    if hint.recording_start_ms is None or hint.recording_date is None:
+        return "invalid/missing CE RTC date/time at bytes 332-355"
+    if hint.recording_date == "2000-01-01":
+        return "CE RTC has the uninitialized date 2000-01-01"
+    return None
+
+
 def infer_recording_start_from_name(path: Path) -> int | None:
     """Return milliseconds since midnight from a WILD recording folder name."""
 

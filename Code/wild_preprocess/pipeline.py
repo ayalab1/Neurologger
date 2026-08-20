@@ -678,6 +678,7 @@ def _write_manifest(path: Path, payload: dict[str, object]) -> Path:
 def _validate_selected_inputs(
     recordings: list,
     *,
+    master_index: int,
     probe_indices: list[int] | None,
     recording_start_anchors: list[dict[str, object]] | None,
 ) -> list[int]:
@@ -698,17 +699,27 @@ def _validate_selected_inputs(
             if not 0 <= value < 86_400_000:
                 raise ValueError(f"recording start anchor {index} is outside one day")
             values.append(value)
-        validate_recording_start_compatibility(
-            [
-                (
-                    value,
-                    str(anchor.get("recording_date"))
-                    if anchor.get("recording_date") is not None
-                    else None,
-                )
-                for value, anchor in zip(values, recording_start_anchors)
-            ]
+        master_anchor = recording_start_anchors[master_index]
+        master_value = values[master_index]
+        master_date = (
+            str(master_anchor.get("recording_date"))
+            if master_anchor.get("recording_date") is not None
+            else None
         )
+        for index, (value, anchor) in enumerate(zip(values, recording_start_anchors)):
+            if index == master_index:
+                continue
+            validate_recording_start_compatibility(
+                [
+                    (master_value, master_date),
+                    (
+                        value,
+                        str(anchor.get("recording_date"))
+                        if anchor.get("recording_date") is not None
+                        else None,
+                    ),
+                ]
+            )
     return probes
 
 
@@ -799,16 +810,17 @@ def run_multidevice_sync(
         progress("inspect_inputs", 0.0)
     with performance.measure("input_inspection"):
         recordings = recordings_from_folders(device_folders)
+        if master_index < 0 or master_index >= len(recordings):
+            raise ValueError(f"master_index {master_index} is outside {len(recordings)} recordings")
         probes = _validate_selected_inputs(
             recordings,
+            master_index=master_index,
             probe_indices=probe_indices,
             recording_start_anchors=recording_start_anchors,
         )
         input_provenance = _input_provenance(recordings, probes, recording_start_anchors)
     if progress is not None:
         progress("inspect_inputs", 100.0)
-    if master_index < 0 or master_index >= len(recordings):
-        raise ValueError(f"master_index {master_index} is outside {len(recordings)} recordings")
     validated_master_anchor: tuple[int, str] | None = None
     if recording_start_anchors is not None:
         master_anchor = recording_start_anchors[master_index]

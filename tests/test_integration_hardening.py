@@ -460,7 +460,7 @@ class IntegrationHardeningTest(unittest.TestCase):
             self.assertTrue(np.all(merged[:, 4:] == 0))
             self.assertFalse(any(segment.device_index == 2 for segment in result.device_sync_segments))
 
-    def test_worker_job_rejects_duplicate_probes_and_misaligned_starts(self) -> None:
+    def test_worker_job_keeps_master_strict_and_assumes_incompatible_slave_start(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             first = root / "device1" / "0_20260809_120000"
@@ -493,8 +493,18 @@ class IntegrationHardeningTest(unittest.TestCase):
             late.mkdir(parents=True)
             _ce_header(late / "CE_params.bin")
             _set_ce_rtc(late / "CE_params.bin", hours=12, minutes=1, seconds=0)
-            with self.assertRaisesRegex(ValueError, "differ by"):
-                _validated_job({**job, "device_folders": [str(first), str(late)]})
+            _folders, _probes, assumed = _validated_job(
+                {**job, "device_folders": [str(first), str(late)]}
+            )
+            self.assertEqual(
+                [item["milliseconds_since_midnight"] for item in assumed],
+                [43_200_000, 43_200_000],
+            )
+            self.assertEqual(assumed[1]["source"], "assumed simultaneous with master")
+            self.assertEqual(assumed[1]["recording_date"], "2026-08-09")
+            self.assertEqual(assumed[1]["reported_ce_milliseconds_since_midnight"], 43_260_000)
+            self.assertEqual(assumed[1]["reported_ce_recording_date"], "2026-08-09")
+            self.assertIn("differ by 60.000s", assumed[1]["assumption_reason"])
             before = root / "device4" / "0_20260809_115932"
             before.mkdir(parents=True)
             near_after = root / "device5" / "0_20260809_120029"
@@ -503,14 +513,13 @@ class IntegrationHardeningTest(unittest.TestCase):
             _ce_header(near_after / "CE_params.bin")
             _set_ce_rtc(before / "CE_params.bin", hours=11, minutes=59, seconds=32)
             _set_ce_rtc(near_after / "CE_params.bin", hours=12, minutes=0, seconds=29)
-            with self.assertRaisesRegex(ValueError, "differ by"):
-                _validated_job(
-                    {
-                        **job,
-                        "device_folders": [str(first), str(near_after), str(before)],
-                        "probe_indices": [1, 2, 3],
-                    }
-                )
+            _validated_job(
+                {
+                    **job,
+                    "device_folders": [str(first), str(near_after), str(before)],
+                    "probe_indices": [1, 2, 3],
+                }
+            )
 
             next_day = root / "device6" / "0_20260810_120000"
             next_day.mkdir(parents=True)
@@ -522,8 +531,44 @@ class IntegrationHardeningTest(unittest.TestCase):
                 seconds=0,
                 day=10,
             )
-            with self.assertRaisesRegex(ValueError, "differ by"):
-                _validated_job({**job, "device_folders": [str(first), str(next_day)]})
+            _folders, _probes, next_day_anchors = _validated_job(
+                {**job, "device_folders": [str(first), str(next_day)]}
+            )
+            self.assertEqual(next_day_anchors[1]["source"], "assumed simultaneous with master")
+            self.assertEqual(next_day_anchors[1]["reported_ce_recording_date"], "2026-08-10")
+
+            uninitialized_slave = root / "device10" / "0_20000101_000008.000"
+            uninitialized_slave.mkdir(parents=True)
+            _ce_header(uninitialized_slave / "CE_params.bin")
+            _set_ce_rtc(
+                uninitialized_slave / "CE_params.bin",
+                hours=0,
+                minutes=0,
+                seconds=8,
+                month=1,
+                day=1,
+                year=0,
+            )
+            _folders, _probes, uninitialized_anchors = _validated_job(
+                {**job, "device_folders": [str(first), str(uninitialized_slave)]}
+            )
+            self.assertEqual(
+                uninitialized_anchors[1]["source"],
+                "assumed simultaneous with master",
+            )
+            self.assertEqual(uninitialized_anchors[1]["reported_ce_recording_date"], "2000-01-01")
+            self.assertIn("uninitialized date", uninitialized_anchors[1]["assumption_reason"])
+
+            invalid_master = root / "device9" / "recording"
+            invalid_master.mkdir(parents=True)
+            _ce_header(invalid_master / "CE_params.bin")
+            with self.assertRaisesRegex(ValueError, "master recording start is unavailable"):
+                _validated_job(
+                    {
+                        **job,
+                        "device_folders": [str(invalid_master), str(second)],
+                    }
+                )
 
             before_midnight = root / "device7" / "recording"
             after_midnight = root / "device8" / "recording"

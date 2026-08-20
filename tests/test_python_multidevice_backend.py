@@ -28,7 +28,12 @@ from wild_preprocess.sync.merge import (
 )
 from wild_preprocess.sync.observe import CorrelationProfile, LagEstimate, _select_lag, estimate_lag
 from wild_preprocess.sync.validate import validate_pair
-from WILD_preprocess_gui.wild_preprocess_gui import RecordingInfo, pc_time_valid_for_recording, preflight_checks
+from WILD_preprocess_gui.wild_preprocess_gui import (
+    RecordingInfo,
+    pc_time_valid_for_recording,
+    preflight_checks,
+    ready_check_log_lines,
+)
 
 
 def _write_ce_params(path: Path, fs: int, n_channels: int) -> None:
@@ -45,13 +50,15 @@ def _write_ce_params_rtc(
     n_channels: int,
     *,
     day: int = 11,
+    month: int = 8,
+    year: int = 26,
     hours: int = 18,
     minutes: int = 13,
     seconds: int = 23,
 ) -> None:
     _write_ce_params(path, fs, n_channels)
     data = bytearray(path.read_bytes())
-    struct.pack_into("<BBBB", data, 332, 2, 8, day, 26)
+    struct.pack_into("<BBBB", data, 332, 2, month, day, year)
     struct.pack_into("<BBBB", data, 336, hours, minutes, seconds, 0)
     struct.pack_into("<IIII", data, 340, 1_839, 9_999, 0, 0)
     path.write_bytes(data)
@@ -125,7 +132,7 @@ class PythonMultideviceBackendTest(unittest.TestCase):
             self.assertEqual(recording_check[0], "FAIL")
             self.assertIn("invalid/missing CE RTC", recording_check[2])
 
-    def test_ready_check_rejects_invalid_header_shape_and_cross_day_selection(self) -> None:
+    def test_ready_check_assumes_master_start_for_incompatible_slave(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             first = root / "device1" / "recording"
@@ -146,7 +153,85 @@ class PythonMultideviceBackendTest(unittest.TestCase):
             compatibility = next(
                 item for item in checks if item[1] == "recording start compatibility"
             )
-            self.assertEqual(compatibility[0], "FAIL")
+            slave_check = next(item for item in checks if item[1] == "device2/recording")
+            self.assertEqual(slave_check[0], "WARN")
+            self.assertIn("assumed simultaneous with master", slave_check[2])
+            self.assertEqual(compatibility[0], "OK")
+            self.assertIn("1 slave start(s) assumed", compatibility[2])
+
+    def test_ready_check_keeps_master_rtc_strict_and_tolerates_uninitialized_slave(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            valid = root / "device1" / "recording"
+            uninitialized = root / "device2" / "recording"
+            valid.mkdir(parents=True)
+            uninitialized.mkdir(parents=True)
+            for folder in (valid, uninitialized):
+                (folder / "amplifier.dat").write_bytes(bytes(128))
+                (folder / "analogin.dat").write_bytes(bytes(32))
+            _write_ce_params_rtc(valid / "CE_params.bin", 20_000, 64)
+            _write_ce_params_rtc(
+                uninitialized / "CE_params.bin",
+                20_000,
+                64,
+                day=1,
+                month=1,
+                year=0,
+                hours=0,
+                minutes=0,
+                seconds=8,
+            )
+            master = self._preflight_recording(valid)
+            master.device_id = "device1"
+            slave = self._preflight_recording(uninitialized)
+            slave.device_id = "device2"
+            slave.role = "slave"
+
+            checks = preflight_checks([master, slave], root)
+            slave_check = next(item for item in checks if item[1] == "device2/recording")
+            self.assertEqual(slave_check[0], "WARN")
+            self.assertIn("uninitialized date 2000-01-01", slave_check[2])
+            self.assertFalse(any(status == "FAIL" for status, _check, _detail in checks))
+
+            (uninitialized / "amplifier.dat").unlink()
+            checks = preflight_checks([master, slave], root)
+            slave_check = next(item for item in checks if item[1] == "device2/recording")
+            self.assertEqual(slave_check[0], "FAIL")
+            self.assertIn("missing amplifier.dat", slave_check[2])
+            (uninitialized / "amplifier.dat").write_bytes(bytes(128))
+
+            master.role = "slave"
+            slave.role = "master"
+            checks = preflight_checks([master, slave], root)
+            master_check = next(item for item in checks if item[1] == "device2/recording")
+            self.assertEqual(master_check[0], "FAIL")
+            self.assertIn("uninitialized date 2000-01-01", master_check[2])
+
+    def test_ready_check_log_lines_include_actionable_details(self) -> None:
+        checks = [
+            ("OK", "selected recordings", "2 selected"),
+            ("FAIL", "master", "0 selected"),
+            ("WARN", "duration spread", "1977.203 sec"),
+        ]
+        self.assertEqual(
+            ready_check_log_lines(checks),
+            [
+                "Ready Check: 1 fail, 1 warn",
+                "  FAIL: master: 0 selected",
+                "  WARN: duration spread: 1977.203 sec",
+            ],
+        )
+
+    def test_ready_check_rejects_invalid_header_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "device1" / "recording"
+            first.mkdir(parents=True)
+            (first / "amplifier.dat").write_bytes(bytes(128))
+            (first / "analogin.dat").write_bytes(bytes(32))
+            _write_ce_params_rtc(first / "CE_params.bin", 20_000, 64)
+            first_info = self._preflight_recording(first)
+            first_info.device_id = "device1"
 
             first_info.fs = None
             first_info.n_channels = None
