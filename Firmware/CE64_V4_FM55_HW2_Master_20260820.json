@@ -1,0 +1,85 @@
+{
+  "format": "CE64_BOOTLOADER_V4_JOINED_HIL_IMAGE",
+  "hex": {
+    "path": "D:\\Code\\CE64\\MDK-ARM\\Release\\WILD64X_HW2_Master\\WILD64X_HW2_Master.hex",
+    "bytes": 876153,
+    "sha256": "f8041fda60d4d0e5bec786b6abad071a3bf9982e790fae1dd32c421cb13b7439"
+  },
+  "vectors": {
+    "loader_sp": 536873704,
+    "loader_reset": 134218421
+  },
+  "application": {
+    "manifest": {
+      "magic": 3694726637799490883,
+      "format_version": 3,
+      "header_bytes": 128,
+      "state": 1145848150,
+      "image_id": 1,
+      "generation": 1787251793,
+      "image_base": 134348800,
+      "image_size": 153616,
+      "image_crc32": 23450717,
+      "vector_sp": 536917112,
+      "vector_reset": 134349649,
+      "build_id_hex": "7d5a6f34ee3ec6c9346efe25dc706a2b35485a1b26bef5525a1f8b064cdbfc21",
+      "flags": 0,
+      "header_crc32": 3988797881,
+      "computed_header_crc32": 3988797881,
+      "header_valid": true
+    },
+    "bytes": 153616,
+    "sha256": "7d5a6f34ee3ec6c9346efe25dc706a2b35485a1b26bef5525a1f8b064cdbfc21"
+  },
+  "service": {
+    "manifest": {
+      "magic": 3771292255281104195,
+      "format_version": 4,
+      "header_bytes": 128,
+      "state": 1145848150,
+      "image_id": 64,
+      "generation": 1787251793,
+      "image_base": 135528960,
+      "image_size": 150792,
+      "image_crc32": 688748361,
+      "vector_sp": 536916960,
+      "vector_reset": 135529821,
+      "build_id_hex": "65d494e36039f1fb23883be0f1e8150d51934a1e7ffdaeddcd428fb5f2f3adf6",
+      "flags": 63,
+      "header_crc32": 1563711363,
+      "computed_header_crc32": 1563711363,
+      "header_valid": true
+    },
+    "bytes": 150792,
+    "sha256": "65d494e36039f1fb23883be0f1e8150d51934a1e7ffdaeddcd428fb5f2f3adf6"
+  },
+  "regions": [
+    {
+      "base": 134217728,
+      "bytes": 6792,
+      "sha256": "0ba7db41f04c1963665bbec64158c1460bad3f36b8ef44062c209ef9a9c56dcf"
+    },
+    {
+      "base": 134283264,
+      "bytes": 128,
+      "sha256": "096d6ec86b43d26606eeee75e702f568193636c1dbca1d39266aaf518c2b3e73"
+    },
+    {
+      "base": 134348800,
+      "bytes": 153616,
+      "sha256": "7d5a6f34ee3ec6c9346efe25dc706a2b35485a1b26bef5525a1f8b064cdbfc21"
+    },
+    {
+      "base": 135528448,
+      "bytes": 128,
+      "sha256": "bab8878c3a33ed78d779cb57640018c08b98c5cfbba97c07b0ff82bd8709451c"
+    },
+    {
+      "base": 135528960,
+      "bytes": 150792,
+      "sha256": "65d494e36039f1fb23883be0f1e8150d51934a1e7ffdaeddcd428fb5f2f3adf6"
+    }
+  ],
+  "warning": "Controlled SWD migration/HIL image; writes loader, app manifest/image, and resident service in one halted session.",
+  "firmware_version": 55
+}

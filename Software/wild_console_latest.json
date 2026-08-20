@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.138",
-  "url": "https://github.com/ayalab1/Neurologger/raw/main/Software/wild_console_Setup_3.4.2.138.exe",
-  "sha256": "697DA31F327052B5939F6C6461ECA5754F19CB22ADBFA4E451686629FD319EED",
-  "notes": "Publishes every current CE/WILD advertisement from all WB55/nRF dongles and Windows Bluetooth, deduplicated by BLE address, while rejecting unrelated FFF0 devices by name."
+  "version": "3.4.2.139",
+  "url": "https://github.com/ayalab1/Neurologger/raw/main/Software/wild_console_Setup_3.4.2.139.exe",
+  "sha256": "D6923B63DBC8E406BEA202E328EA850F1496AD6FCC984A39F4077276D6C006DA",
+  "notes": "Adds V7 CE64 advertisement support while retaining V2-V6 parsing, including alternating 24-bit elapsed-time and AUX/MCU temperature pages."
 }
