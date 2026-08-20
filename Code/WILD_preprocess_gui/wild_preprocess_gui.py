@@ -30,6 +30,7 @@ if str(CODE_ROOT) not in sys.path:
 from wild_preprocess.analog import imu_capacity_issue
 from wild_preprocess.pc_time import (
     align_pc_time_file,
+    ce_recording_start_issue,
     read_ce_params_hint,
     validate_recording_start_compatibility,
 )
@@ -520,7 +521,27 @@ def preflight_checks(recordings: list[RecordingInfo], basepath: Path | None = No
         by_device[rec.device_id] = by_device.get(rec.device_id, 0) + 1
     repeated = [device for device, count in by_device.items() if count > 1]
     checks.append(("OK" if not repeated else "FAIL", "one recording per device", ", ".join(repeated) or "unique"))
+    start_hints: dict[int, Any] = {}
+    start_hint_errors: dict[int, OSError] = {}
+    for rec in selected:
+        if not rec.ce_params_file.exists():
+            continue
+        try:
+            start_hints[id(rec)] = read_ce_params_hint(rec.folder)
+        except OSError as exc:
+            start_hint_errors[id(rec)] = exc
+
+    master = masters[0] if len(masters) == 1 else None
+    master_hint = start_hints.get(id(master)) if master is not None else None
+    master_anchor = None
+    if master_hint is not None and ce_recording_start_issue(master_hint) is None:
+        master_anchor = (
+            int(master_hint.recording_start_ms),
+            str(master_hint.recording_date),
+        )
+
     start_anchors: list[tuple[int, str | None]] = []
+    assumed_slave_count = 0
     for rec in selected:
         status = "OK"
         details: list[str] = []
@@ -533,20 +554,38 @@ def preflight_checks(recordings: list[RecordingInfo], basepath: Path | None = No
         if not rec.ce_params_file.exists():
             status = "FAIL"
             details.append("missing CE_params.bin")
+        elif id(rec) in start_hint_errors:
+            status = "FAIL"
+            details.append(f"cannot read CE_params.bin: {start_hint_errors[id(rec)]}")
         else:
-            try:
-                start_hint = read_ce_params_hint(rec.folder)
-            except OSError as exc:
-                status = "FAIL"
-                details.append(f"cannot read CE_params.bin: {exc}")
-            else:
-                if start_hint.recording_start_ms is None or start_hint.recording_date is None:
-                    status = "FAIL"
-                    details.append("invalid/missing CE RTC date/time at bytes 332-355")
+            start_hint = start_hints[id(rec)]
+            start_issue = ce_recording_start_issue(start_hint)
+            if start_issue is not None:
+                if rec is not master and master_anchor is not None:
+                    status = "WARN" if status == "OK" else status
+                    details.append(f"{start_issue}; slave start assumed simultaneous with master")
+                    start_anchors.append(master_anchor)
+                    assumed_slave_count += 1
                 else:
-                    start_anchors.append(
-                        (start_hint.recording_start_ms, start_hint.recording_date)
-                    )
+                    status = "FAIL"
+                    details.append(start_issue)
+            else:
+                candidate_anchor = (
+                    int(start_hint.recording_start_ms),
+                    str(start_hint.recording_date),
+                )
+                if rec is not master and master_anchor is not None:
+                    try:
+                        validate_recording_start_compatibility([master_anchor, candidate_anchor])
+                    except ValueError as exc:
+                        status = "WARN" if status == "OK" else status
+                        details.append(f"{exc}; slave start assumed simultaneous with master")
+                        start_anchors.append(master_anchor)
+                        assumed_slave_count += 1
+                    else:
+                        start_anchors.append(candidate_anchor)
+                else:
+                    start_anchors.append(candidate_anchor)
         if rec.fs is None:
             status = "FAIL"
             details.append("invalid/missing CE ephys sample rate")
@@ -575,11 +614,18 @@ def preflight_checks(recordings: list[RecordingInfo], basepath: Path | None = No
         checks.append((status, f"{rec.device_id}/{rec.recording_name}", "; ".join(details) or "ready"))
     if len(start_anchors) == len(selected) and len(start_anchors) >= 2:
         try:
-            validate_recording_start_compatibility(start_anchors)
+            if master_anchor is None:
+                validate_recording_start_compatibility(start_anchors)
+            else:
+                for anchor in start_anchors:
+                    validate_recording_start_compatibility([master_anchor, anchor])
         except ValueError as exc:
             checks.append(("FAIL", "recording start compatibility", str(exc)))
         else:
-            checks.append(("OK", "recording start compatibility", "within 30s using CE date/time"))
+            detail = "within 30s using CE date/time"
+            if assumed_slave_count:
+                detail += f"; {assumed_slave_count} slave start(s) assumed simultaneous with master"
+            checks.append(("OK", "recording start compatibility", detail))
     if selected:
         process_imu, imu_reason = _imu_job_decision(selected)
         checks.append(
@@ -641,6 +687,20 @@ def preflight_checks(recordings: list[RecordingInfo], basepath: Path | None = No
 
 def has_ready_check_failure(recordings: list[RecordingInfo], basepath: Path | None = None) -> bool:
     return any(status == "FAIL" for status, _check, _detail in preflight_checks(recordings, basepath))
+
+
+def ready_check_log_lines(checks: list[tuple[str, str, str]]) -> list[str]:
+    """Format actionable Ready Check output for the GUI Log pane."""
+
+    failures = sum(1 for status, _check, _detail in checks if status == "FAIL")
+    warnings = sum(1 for status, _check, _detail in checks if status == "WARN")
+    lines = [f"Ready Check: {failures} fail, {warnings} warn"]
+    lines.extend(
+        f"  {status}: {check}: {detail}"
+        for status, check, detail in checks
+        if status in {"FAIL", "WARN"}
+    )
+    return lines
 
 
 def main() -> int:
@@ -708,6 +768,7 @@ def main() -> int:
             self._continue_after_sync_qc = False
             self._progress_re = re.compile(r"WILD_PROGRESS:([^:]+):([0-9.]+)")
             self._log_buffer = ""
+            self._last_preflight_signature: tuple[object, ...] | None = None
             self._log_timer = QTimer(self)
             self._log_timer.setInterval(80)
             self._log_timer.setSingleShot(True)
@@ -912,6 +973,7 @@ def main() -> int:
                 QMessageBox.critical(self, "Scan failed", str(exc))
                 return
             self._append_log(f"Discovered {len(self.recordings)} logger recording folder(s) inside {self.basepath}")
+            self._last_preflight_signature = None
             self._refresh_recording_table()
             self._refresh_preview()
             self._run_preflight()
@@ -1102,10 +1164,12 @@ def main() -> int:
             if self._backend_process is not None or self._pc_time_process is not None:
                 self._append_log("Blocked: a preprocessing process is already running.")
                 return
-            self._run_preflight()
+            checks = self._run_preflight(force_log=True)
             selected = self._selected_recordings_for_run()
-            if has_ready_check_failure(self.recordings, self.basepath):
-                self._append_log("Blocked: Ready Check has FAIL items. Resolve them before running.")
+            failures = [(check, detail) for status, check, detail in checks if status == "FAIL"]
+            if failures:
+                first_check, first_detail = failures[0]
+                self._append_log(f"Blocked: {first_check}: {first_detail}")
                 return
             if not selected:
                 self._append_log("Blocked: no selected recordings.")
@@ -1405,15 +1469,25 @@ def main() -> int:
                     total += max(1, rec.n_channels // 4)
             return max(16, total)
 
-        def _run_preflight(self) -> None:
+        def _run_preflight(self, *, force_log: bool = False) -> list[tuple[str, str, str]]:
             checks = preflight_checks(self.recordings, self.basepath)
             self.preflight_table.setRowCount(len(checks))
+            first_failure_item = None
             for row, (status, check, detail) in enumerate(checks):
                 for col, value in enumerate((status, check, detail)):
                     item = QTableWidgetItem(value)
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                     self.preflight_table.setItem(row, col, item)
-            self._append_log(f"Ready Check: {sum(1 for s, _, _ in checks if s == 'FAIL')} fail, {sum(1 for s, _, _ in checks if s == 'WARN')} warn")
+                    if status == "FAIL" and first_failure_item is None:
+                        first_failure_item = item
+            if first_failure_item is not None:
+                self.preflight_table.scrollToItem(first_failure_item)
+            signature: tuple[object, ...] = (str(self.basepath), *checks)
+            if force_log or signature != self._last_preflight_signature:
+                for line in ready_check_log_lines(checks):
+                    self._append_log(line)
+                self._last_preflight_signature = signature
+            return checks
 
         def _refresh_preview(self) -> None:
             return

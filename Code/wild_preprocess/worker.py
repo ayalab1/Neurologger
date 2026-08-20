@@ -12,6 +12,7 @@ from wild_preprocess.models import SyncOptions
 from wild_preprocess.pipeline import run_multidevice_sync
 from wild_preprocess.pc_time import (
     PcTimeOptions,
+    ce_recording_start_issue,
     read_ce_params_hint,
     resolve_recording_start_ms,
     validate_recording_start_compatibility,
@@ -21,6 +22,7 @@ from wild_preprocess.pc_time import (
 _LAST_PROGRESS_STAGE: str | None = None
 _LAST_PROGRESS_PERCENT = -1.0
 WORKER_JOB_SCHEMA_VERSION = 3
+ASSUMED_SLAVE_START_SOURCE = "assumed simultaneous with master"
 _BOOLEAN_JOB_FIELDS = {
     "allow_folder_name_start_fallback": False,
     "overwrite": False,
@@ -55,6 +57,57 @@ def _job_boolean(job: dict[str, object], field: str) -> bool:
     return value
 
 
+def _resolved_recording_start_anchor(
+    folder: Path,
+    *,
+    explicit_recording_start_ms: int | None,
+    allow_folder_name_fallback: bool,
+) -> dict[str, object]:
+    hint = read_ce_params_hint(folder)
+    start_ms, source = resolve_recording_start_ms(
+        folder,
+        explicit_recording_start_ms=explicit_recording_start_ms,
+        allow_folder_name_fallback=allow_folder_name_fallback,
+    )
+    issue = ce_recording_start_issue(hint)
+    if source == "CE_params.bin":
+        if issue is not None:
+            raise ValueError(issue)
+    recording_date = hint.recording_date
+    if issue is not None:
+        recording_date = None
+    return {
+        "milliseconds_since_midnight": start_ms,
+        "source": source,
+        "recording_date": recording_date,
+        "recording_date_source": "CE_params.bin" if recording_date is not None else None,
+    }
+
+
+def _assumed_slave_start_anchor(
+    master_anchor: dict[str, object],
+    folder: Path,
+    reason: str,
+) -> dict[str, object]:
+    try:
+        reported = read_ce_params_hint(folder)
+    except OSError:
+        reported_ms = None
+        reported_date = None
+    else:
+        reported_ms = reported.recording_start_ms
+        reported_date = reported.recording_date
+    return {
+        "milliseconds_since_midnight": int(master_anchor["milliseconds_since_midnight"]),
+        "source": ASSUMED_SLAVE_START_SOURCE,
+        "recording_date": master_anchor.get("recording_date"),
+        "recording_date_source": ASSUMED_SLAVE_START_SOURCE,
+        "reported_ce_milliseconds_since_midnight": reported_ms,
+        "reported_ce_recording_date": reported_date,
+        "assumption_reason": reason,
+    }
+
+
 def _validated_job(job: dict[str, object]) -> tuple[list[Path], list[int], list[dict[str, object]]]:
     """Validate the GUI job before feature extraction or output mutation."""
 
@@ -86,38 +139,70 @@ def _validated_job(job: dict[str, object]) -> tuple[list[Path], list[int], list[
     run_id = job.get("run_id")
     if run_id is not None and (not isinstance(run_id, str) or not run_id.strip()):
         raise ValueError("run_id must be a non-empty string")
+    master_folder = folders[master_index - 1]
+    try:
+        master_anchor = _resolved_recording_start_anchor(
+            master_folder,
+            explicit_recording_start_ms=(int(explicit) if explicit is not None else None),
+            allow_folder_name_fallback=allow_folder_name_fallback,
+        )
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"{master_folder}: master recording start is unavailable: {exc}") from exc
+
     anchors: list[dict[str, object]] = []
     for index, folder in enumerate(folders, start=1):
+        if index == master_index:
+            anchors.append(master_anchor)
+            continue
         try:
-            start_ms, source = resolve_recording_start_ms(
+            candidate = _resolved_recording_start_anchor(
                 folder,
-                explicit_recording_start_ms=(int(explicit) if explicit is not None and index == master_index else None),
+                explicit_recording_start_ms=None,
                 allow_folder_name_fallback=allow_folder_name_fallback,
             )
-        except ValueError as exc:
-            raise ValueError(f"{folder}: {exc}") from exc
-        hint = read_ce_params_hint(folder)
-        recording_date = hint.recording_date
-        date_source = "CE_params.bin" if recording_date is not None else None
-        anchors.append(
-            {
-                "milliseconds_since_midnight": start_ms,
-                "source": source,
-                "recording_date": recording_date,
-                "recording_date_source": date_source,
-            }
-        )
-    validate_recording_start_compatibility(
-        [
-            (
-                int(anchor["milliseconds_since_midnight"]),
-                str(anchor["recording_date"])
-                if anchor["recording_date"] is not None
-                else None,
+            validate_recording_start_compatibility(
+                [
+                    (
+                        int(master_anchor["milliseconds_since_midnight"]),
+                        str(master_anchor["recording_date"])
+                        if master_anchor["recording_date"] is not None
+                        else None,
+                    ),
+                    (
+                        int(candidate["milliseconds_since_midnight"]),
+                        str(candidate["recording_date"])
+                        if candidate["recording_date"] is not None
+                        else None,
+                    ),
+                ]
             )
-            for anchor in anchors
-        ]
+        except OSError as exc:
+            raise ValueError(f"{folder}: cannot read slave recording metadata: {exc}") from exc
+        except ValueError as exc:
+            anchors.append(_assumed_slave_start_anchor(master_anchor, folder, str(exc)))
+        else:
+            anchors.append(candidate)
+
+    master_pair = (
+        int(master_anchor["milliseconds_since_midnight"]),
+        str(master_anchor["recording_date"])
+        if master_anchor["recording_date"] is not None
+        else None,
     )
+    for index, anchor in enumerate(anchors, start=1):
+        if index == master_index:
+            continue
+        validate_recording_start_compatibility(
+            [
+                master_pair,
+                (
+                    int(anchor["milliseconds_since_midnight"]),
+                    str(anchor["recording_date"])
+                    if anchor["recording_date"] is not None
+                    else None,
+                ),
+            ]
+        )
     return folders, probes, anchors
 
 
