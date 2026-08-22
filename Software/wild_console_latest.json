@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.140",
-  "url": "https://github.com/ayalab1/Neurologger/raw/main/Software/wild_console_Setup_3.4.2.140.exe",
-  "sha256": "38B5EE0092A426AE1E8644610100374F6CFBAAFCFF01D1DE06A3B0C1918AF300",
-  "notes": "Adds V7 CE64 advertisement support while retaining V2-V6 parsing, and bundles the four current FM55 V4 fused firmware HEX images under the Wild Console installation firmware folder."
+  "version": "3.4.2.142",
+  "url": "https://github.com/ayalab1/Neurologger/releases/download/wild-console-3.4.2.142/wild_console_Setup_3.4.2.142.exe",
+  "sha256": "97090C5F08E90A470C714853D38CA978EBD0313BE0C41109247A61F3A5988F38",
+  "notes": "BLE sync, reconnect, recording control, and CE64 FM56 firmware update."
 }
