@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.142",
-  "url": "https://github.com/ayalab1/Neurologger/releases/download/wild-console-3.4.2.142/wild_console_Setup_3.4.2.142.exe",
-  "sha256": "97090C5F08E90A470C714853D38CA978EBD0313BE0C41109247A61F3A5988F38",
-  "notes": "BLE sync, reconnect, recording control, and CE64 FM56 firmware update."
+  "version": "3.4.2.143",
+  "url": "https://github.com/ayalab1/Neurologger/releases/download/wild-console-3.4.2.143/wild_console_Setup_3.4.2.143.exe",
+  "sha256": "9C292DF4EDBF9A92106B5A1576078CAC0E722815F45F31CC59072338748D7C24",
+  "notes": "Per-device preview channel filtering and CE64 FM56 RTC/HSE timing fix."
 }
