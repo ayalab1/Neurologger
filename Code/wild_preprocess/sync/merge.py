@@ -1177,6 +1177,16 @@ def _merge_recordings_into_folder(
         timing("analog_merge", "start", 0, 0)
     if progress is not None:
         progress("write_analog", 0.0)
+    analog_write_progress = (
+        (
+            lambda _stage, percent: progress(
+                "write_analog",
+                85.0 * percent / 100.0,
+            )
+        )
+        if progress is not None
+        else None
+    )
     try:
         if analog_integrity_results is not None or analog_clock_priors is not None:
             if analog_integrity_results is None or analog_clock_priors is None:
@@ -1269,7 +1279,7 @@ def _merge_recordings_into_folder(
                 validity_path=analog_validity_path,
                 chunk_rows=max(1, round(chunk_seconds * ANALOG_FS)),
                 overwrite=overwrite,
-                progress=progress,
+                progress=analog_write_progress,
                 invalid_lane_intervals_by_device={
                     device_index: {
                         lane: tuple(
@@ -1305,7 +1315,7 @@ def _merge_recordings_into_folder(
                 stream="analog",
                 chunk_seconds=chunk_seconds,
                 overwrite=overwrite,
-                progress=progress,
+                progress=analog_write_progress,
                 device_gaps=device_gaps,
                 classified_intervals=classified_intervals,
                 device_source_steps=device_source_steps,
@@ -1326,7 +1336,11 @@ def _merge_recordings_into_folder(
                 + (analog_validity_path.stat().st_size if analog_validity_path.exists() else 0),
             )
     validity_summary = _validity_summary(validity_path, ephys_samples, len(recordings))
+    if progress is not None:
+        progress("write_analog", 90.0)
     _write_time_dat(time_path, ephys_samples, overwrite)
+    if progress is not None:
+        progress("write_analog", 95.0)
     channel_layout = _channel_layout_records(recordings, master_index)
     event_summary = _collect_events(
         analog_path,
@@ -1345,6 +1359,8 @@ def _merge_recordings_into_folder(
         analog_validity_path=(analog_validity_path if analog_validity_path.exists() else None),
         master_index=master_index,
     )
+    if progress is not None:
+        progress("write_analog", 100.0)
 
     def mapped_ephys_sample(
         device_index: int, model: SyncModel, canonical_sample: int
@@ -1678,24 +1694,44 @@ def merge_recordings(
         )
         if progress is not None:
             progress("publish", 0.0)
+        promotion_names = sorted(
+            name for name in staged_files if name != "wild_preprocess_run.json"
+        )
+        if "wild_preprocess_run.json" in staged_files:
+            promotion_names.append("wild_preprocess_run.json")
+        publish_operation_count = sum(
+            (output_folder / name).exists() for name in managed_names
+        ) + len(promotion_names)
+        completed_publish_operations = 0
         for name in managed_names:
             destination = output_folder / name
             if destination.exists():
                 backup_path = backup / name
                 os.replace(destination, backup_path)
                 backed_up.append((destination, backup_path))
-        promotion_names = sorted(
-            name for name in staged_files if name != "wild_preprocess_run.json"
-        )
-        if "wild_preprocess_run.json" in staged_files:
-            promotion_names.append("wild_preprocess_run.json")
+                completed_publish_operations += 1
+                if progress is not None and publish_operation_count:
+                    progress(
+                        "publish",
+                        99.0
+                        * completed_publish_operations
+                        / publish_operation_count,
+                    )
         for name in promotion_names:
             staged_path = staged_files[name]
             destination = output_folder / name
             os.replace(staged_path, destination)
             promoted.append(destination)
+            completed_publish_operations += 1
+            if progress is not None and publish_operation_count:
+                progress(
+                    "publish",
+                    99.0 * completed_publish_operations / publish_operation_count,
+                )
         (backup / "COMMITTED").write_text("complete\n", encoding="utf-8")
         transaction_committed = True
+        if progress is not None:
+            progress("publish", 100.0)
         return {
             key: str(output_folder / Path(value).name)
             for key, value in staged_outputs.items()

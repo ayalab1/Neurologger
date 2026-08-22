@@ -269,8 +269,9 @@ class IntegrationHardeningTest(unittest.TestCase):
             for stage, percent in progress_events:
                 by_stage.setdefault(stage, []).append(percent)
             for values_for_stage in by_stage.values():
-                self.assertGreaterEqual(values_for_stage[0], 0.0)
+                self.assertEqual(values_for_stage[0], 0.0)
                 self.assertEqual(values_for_stage[-1], 100.0)
+                self.assertEqual(values_for_stage, sorted(values_for_stage))
 
     def test_partial_pc_time_is_not_published_on_writer_warning(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

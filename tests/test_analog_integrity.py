@@ -13,7 +13,12 @@ CODE_ROOT = REPO_ROOT / "Code"
 if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
-from wild_preprocess.analog.integrity import scan_analog_frames, scan_analog_integrity
+from wild_preprocess.analog.integrity import (
+    AnalogIntegrityEvent,
+    _payload_candidates_without_overlap,
+    scan_analog_frames,
+    scan_analog_integrity,
+)
 from wild_preprocess.analog.models import DeviceClockPrior
 from wild_preprocess.analog.segments import build_event_driven_analog_segments, map_canonical_rows
 
@@ -44,6 +49,54 @@ class AnalogIntegrityTest(unittest.TestCase):
         self.assertTrue(result.clean)
         self.assertEqual(result.metrics.counter_nonunit_delta_count, 0)
         self.assertAlmostEqual(result.metrics.imu_median_update_rows or 0.0, 6.0)
+
+    def test_indexed_payload_overlap_policy_matches_greedy_reference(self) -> None:
+        existing = (
+            AnalogIntegrityEvent(
+                kind="counter_corruption",
+                raw_start_row=8,
+                raw_end_row=12,
+                tick_start=8,
+                tick_end=12,
+                affected_lanes=(0,),
+                displacement_rows=None,
+                confidence="medium",
+                evidence="fixture",
+            ),
+            AnalogIntegrityEvent(
+                kind="temporary_excursion",
+                raw_start_row=30,
+                raw_end_row=35,
+                tick_start=30,
+                tick_end=35,
+                affected_lanes=(0,),
+                displacement_rows=1,
+                confidence="medium",
+                evidence="fixture",
+            ),
+        )
+        candidates = (
+            (0, 4, 3),
+            (4, 8, 3),
+            (7, 10, 3),
+            (12, 16, 3),
+            (14, 18, 4),
+            (28, 30, 3),
+            (29, 31, 3),
+            (35, 40, 3),
+        )
+        occupied = [(event.raw_start_row, event.raw_end_row) for event in existing]
+        expected: list[tuple[int, int, int]] = []
+        for candidate in candidates:
+            start, end, _lag = candidate
+            if any(start < old_end and old_start < end for old_start, old_end in occupied):
+                continue
+            expected.append(candidate)
+            occupied.append((start, end))
+        self.assertEqual(
+            _payload_candidates_without_overlap(candidates, existing),
+            tuple(expected),
+        )
 
     def test_counter_wrap_is_not_a_phase_event(self) -> None:
         result = scan_analog_frames(_frames(12, start_tick=65_530))
@@ -217,6 +270,57 @@ class AnalogIntegrityTest(unittest.TestCase):
         self.assertEqual((event.raw_start_row, event.raw_end_row), (80, 91))
         self.assertEqual(event.affected_lanes, tuple([*range(0, 11), *range(12, 16)]))
         self.assertEqual(result.valid_raw_support_runs(), ((0, 80), (91, 150)))
+
+    def test_housekeeping_cycle_alone_is_not_dynamic_payload_replay(self) -> None:
+        frames = np.zeros((150, 16), dtype="<i2")
+        frames[:, 10] = np.resize(np.asarray([14_973, 22_448, 0], dtype=np.int16), 150)
+        frames[:, 11] = np.arange(150, dtype=np.uint16).view(np.int16)
+        for chunk_rows in (2, 7, 150):
+            with self.subTest(chunk_rows=chunk_rows):
+                result = scan_analog_frames(
+                    frames,
+                    chunk_rows=chunk_rows,
+                    payload_repeat_max_lag_rows=64,
+                )
+                self.assertNotIn("repeat_overwrite", self._kinds(result))
+
+        # The CE64 replay-evidence layout is independent of an IMU extraction
+        # override; adding lane 10 to that separate option must not restore the
+        # housekeeping false positive.
+        result = scan_analog_frames(
+            frames,
+            imu_lanes=tuple(range(1, 11)),
+            payload_repeat_max_lag_rows=64,
+        )
+        self.assertNotIn("repeat_overwrite", self._kinds(result))
+
+    def test_housekeeping_cycle_does_not_hide_dynamic_science_payload_replay(self) -> None:
+        frames = _frames(160)
+        frames[:, 10] = np.resize(np.asarray([14_973, 22_448, 0], dtype=np.int16), 160)
+        lanes = [*range(0, 11), *range(12, 16)]
+        start, length, lag = 96, 18, 48
+        frames[start : start + length, lanes] = frames[
+            start - lag : start + length - lag,
+            lanes,
+        ]
+        result = scan_analog_frames(
+            frames,
+            chunk_rows=7,
+            payload_repeat_max_lag_rows=64,
+        )
+        event = next(event for event in result.events if event.kind == "repeat_overwrite")
+        self.assertEqual((event.raw_start_row, event.raw_end_row), (start, start + length))
+        self.assertIn("lag 48 rows", event.evidence)
+
+    def test_payload_activity_lanes_must_be_valid_non_counter_lanes(self) -> None:
+        frames = _frames(30)
+        for activity_lanes in ((), (0, 0), (11,), (16,)):
+            with self.subTest(activity_lanes=activity_lanes):
+                with self.assertRaisesRegex(ValueError, "payload activity lanes"):
+                    scan_analog_frames(
+                        frames,
+                        payload_activity_lanes=activity_lanes,
+                    )
 
     def test_counter_continuous_payload_replay_detects_large_nonhistorical_lag(self) -> None:
         frames = _frames(1_100)

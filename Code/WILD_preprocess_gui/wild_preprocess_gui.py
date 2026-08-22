@@ -71,6 +71,17 @@ def stage_progress_text(stage: str, percent: float) -> str:
     return f"{stage.replace('_', ' ').strip().title()} - {value}%"
 
 
+def split_complete_process_output(buffer: str, chunk: str) -> tuple[str, str]:
+    """Return pending text and complete lines from arbitrarily split output."""
+
+    parts = (buffer + chunk).splitlines(keepends=True)
+    if parts and not parts[-1].endswith(("\n", "\r")):
+        pending = parts.pop()
+    else:
+        pending = ""
+    return pending, "".join(parts)
+
+
 def _python_worker_job(
     selected: list[RecordingInfo],
     *,
@@ -762,6 +773,7 @@ def main() -> int:
             self._backend_process: QProcess | None = None
             self._backend_job_path: Path | None = None
             self._backend_run_id: str | None = None
+            self._backend_output_buffer = ""
             self._pc_time_raw_path: Path | None = None
             self._pc_time_stdout = ""
             self._continue_after_pc_time = False
@@ -1255,6 +1267,7 @@ def main() -> int:
             self._append_log(f"  output: {self.basepath}")
             process = QProcess(self)
             self._backend_process = process
+            self._backend_output_buffer = ""
             process.setProgram(command[0])
             process.setArguments(command[1:])
             process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
@@ -1306,6 +1319,7 @@ def main() -> int:
             self._append_log(f"  output: {self.basepath}")
             process = QProcess(self)
             self._backend_process = process
+            self._backend_output_buffer = ""
             process.setProgram(command[0])
             process.setArguments(command[1:])
             process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
@@ -1340,6 +1354,7 @@ def main() -> int:
             self._backend_job_path = Path(handle.name)
             process = QProcess(self)
             self._backend_process = process
+            self._backend_output_buffer = ""
             process.setProgram(sys.executable)
             process.setArguments([str(PYTHON_BACKEND_WORKER), str(self._backend_job_path)])
             process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
@@ -1360,6 +1375,15 @@ def main() -> int:
                 self._backend_finished(-1)
 
         def _backend_finished(self, return_code: int) -> None:
+            if self._backend_process is not None:
+                self._read_process_output(self._backend_process)
+            if self._backend_output_buffer:
+                residual = self._backend_output_buffer
+                self._backend_output_buffer = ""
+                self._update_progress_from_text(residual)
+                cleaned = self._remove_progress_lines(residual)
+                if cleaned.strip():
+                    self._append_log(cleaned)
             is_matlab = SYNC_BACKEND == "matlab"
             expected_run_id = None if is_matlab else self._backend_run_id
             self._backend_run_id = None
@@ -1567,8 +1591,14 @@ def main() -> int:
 
         def _read_process_output(self, process: QProcess) -> None:
             chunk = bytes(process.readAllStandardOutput()).decode(errors="replace")
-            self._update_progress_from_text(chunk)
-            cleaned = self._remove_progress_lines(chunk)
+            self._backend_output_buffer, complete = split_complete_process_output(
+                self._backend_output_buffer,
+                chunk,
+            )
+            if not complete:
+                return
+            self._update_progress_from_text(complete)
+            cleaned = self._remove_progress_lines(complete)
             if cleaned.strip():
                 self._append_log(cleaned)
 
