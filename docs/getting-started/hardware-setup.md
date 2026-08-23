@@ -34,8 +34,9 @@ For a newly assembled WILD device, complete the bench power and programming chec
 5. If current is higher than expected, disconnect the device and inspect the power connector, regulator area, microSD socket, and fine-pitch solder joints before continuing.
 6. To enter DFU mode, momentarily short the DFU mode-select pin to VCC with metal tweezers while connecting USB. Use the connector schematic and avoid shorting adjacent pins.
 7. Confirm that Windows detects an `STM32-DFU` device. If needed, install the ST DFU driver from [STSW-STM32080](https://www.st.com/en/development-tools/stsw-stm32080.html).
-8. In WILD Console, open the **Advanced** tab and use the DFU update pipeline to install the latest validated `.hex` release image for the hardware revision.
-9. After the first release image is installed, later supported updates can be performed through microSD when the release notes document that path.
+8. In WILD Console, use a fused `.hex` release image matching both the hardware revision (**HW1** or **HW2**) and operating role (**Auto**, **Master**, or **Slave**).
+9. Use the Console's full-flash USB path for first installation or bootloader recovery. An interrupted full-flash operation can require SWD recovery, so use stable power and USB throughout.
+10. After Bootloader V4 is installed, use the normal application-only USB update or the supported microSD path for later releases. See [USB Mode](../software/usb-mode.md) for the current GUI procedure.
 
 Detailed board-ordering, assembly, and special-component notes are listed in [Fabrication](../fabrication.md).
 
