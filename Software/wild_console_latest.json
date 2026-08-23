@@ -1,6 +1,6 @@
 {
   "version": "3.4.2.144",
-  "url": "https://github.com/ayalab1/Neurologger/releases/download/wild-console-3.4.2.144/wild_console_Setup_3.4.2.144.exe",
+  "url": "https://github.com/ayalab1/Neurologger/releases/download/WILD_API_3_4_2_144/wild_console_Setup_3.4.2.144.exe",
   "sha256": "FE9500970155862340879A8DDB7F6FC5E0645B18BFBFD1D7FCA2A14CEEEE741C",
   "notes": "Single fused HEX workflow for SD and USB updates, with optional full-flash recovery."
 }
