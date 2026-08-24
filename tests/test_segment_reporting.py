@@ -20,6 +20,7 @@ from WILD_preprocess_gui.wild_preprocess_gui import (
     _imu_job_decision,
     _published_python_run_summary,
     _python_worker_job,
+    split_complete_process_output,
     stage_progress_text,
 )
 from wild_preprocess.inspection import (
@@ -61,6 +62,18 @@ class SegmentReportingTest(unittest.TestCase):
             "Step 3/12 - Synchronize loggers - 42%",
         )
         self.assertEqual(stage_progress_text("complete", 100), "Complete - 100%")
+
+    def test_gui_progress_lines_survive_arbitrary_process_chunks(self) -> None:
+        pending, complete = split_complete_process_output("", "WILD_PROG")
+        self.assertEqual((pending, complete), ("WILD_PROG", ""))
+        pending, complete = split_complete_process_output(
+            pending,
+            "RESS:integrity_scan:50.000\r\nmessage",
+        )
+        self.assertEqual(pending, "message")
+        self.assertEqual(complete, "WILD_PROGRESS:integrity_scan:50.000\r\n")
+        pending, complete = split_complete_process_output(pending, " complete\n")
+        self.assertEqual((pending, complete), ("", "message complete\n"))
 
     def test_gui_worker_job_requests_supported_imu_and_has_run_identity(self) -> None:
         recording = RecordingInfo(

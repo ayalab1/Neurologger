@@ -9,6 +9,7 @@ from becoming false duplication events.
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Iterable, Literal, Sequence
@@ -338,15 +339,72 @@ def _normalise_timeline_events(
     return tuple(normalized)
 
 
+def _payload_candidates_without_overlap(
+    candidates: Sequence[tuple[int, int, int]],
+    existing_events: Sequence[AnalogIntegrityEvent],
+) -> tuple[tuple[int, int, int], ...]:
+    """Apply the existing greedy overlap policy without quadratic scans.
+
+    ``_payload_repeat_candidates`` returns candidates ordered by raw start.
+    The historical caller accepted each candidate only when it overlapped
+    neither pre-existing counter evidence nor an earlier accepted payload
+    candidate.  Pre-existing intervals are indexed as a sorted union; accepted
+    payload candidates need only the most recent end because the accepted set
+    is ordered and non-overlapping.  This changes lookup cost, not decisions.
+    """
+
+    occupied: list[tuple[int, int]] = []
+    for event in sorted(existing_events, key=lambda item: (item.raw_start_row, item.raw_end_row)):
+        start = int(event.raw_start_row)
+        end = int(event.raw_end_row)
+        if occupied and start <= occupied[-1][1]:
+            occupied[-1] = (occupied[-1][0], max(occupied[-1][1], end))
+        else:
+            occupied.append((start, end))
+    occupied_starts = [start for start, _end in occupied]
+    accepted: list[tuple[int, int, int]] = []
+    last_payload_end = -1
+    for start, end, lag in candidates:
+        insertion = bisect_left(occupied_starts, end)
+        overlaps_existing = insertion > 0 and occupied[insertion - 1][1] > start
+        if overlaps_existing or last_payload_end > start:
+            continue
+        accepted.append((start, end, lag))
+        last_payload_end = end
+    return tuple(accepted)
+
+
+def _exact_sequence_match_mask(
+    frames: np.ndarray,
+    lanes: np.ndarray,
+    rows: np.ndarray,
+    source_rows: np.ndarray,
+    *,
+    sequence_rows: int,
+) -> np.ndarray:
+    """Byte-confirm many newest-source proposals with bounded vector work."""
+
+    matches = np.ones(rows.size, dtype=bool)
+    for offset in range(sequence_rows):
+        active = np.flatnonzero(matches)
+        if not active.size:
+            break
+        left = frames[(rows[active] - offset)[:, None], lanes]
+        right = frames[(source_rows[active] - offset)[:, None], lanes]
+        matches[active] = np.all(left == right, axis=1)
+    return matches
+
+
 def _payload_repeat_candidates(
     frames: np.ndarray,
     *,
     counter_lane: int,
+    activity_lanes: Sequence[int],
     max_lag_rows: int,
     minimum_rows: int,
     chunk_rows: int,
 ) -> tuple[tuple[int, int, int], ...]:
-    """Find dynamic multi-lane replay evidence even if the counter is fresh.
+    """Find dynamic scientific-payload replay evidence with a fresh counter.
 
     A bounded rolling hash proposes multi-row candidates; exact payload bytes
     over at least ``minimum_rows`` rows confirm them.  Using a *sequence*
@@ -357,13 +415,29 @@ def _payload_repeat_candidates(
     memory.  The horizon is an operator parameter, not a firmware constant:
     counter-phase replay detection has no such lag ceiling, while a recording
     with a freshly rewritten counter can request a larger payload-only search.
-    A fixed scalar frame (for example an animal at rest) does not reach the
-    dynamic-sequence test.
+    Candidate hashes and exact confirmation cover every non-counter lane, but
+    only ``activity_lanes`` can satisfy the dynamic-sequence guard.  Expected
+    housekeeping/timing cadence therefore cannot turn otherwise held sensor
+    payload into replay evidence.  A fixed scientific payload (for example an
+    animal at rest) does not reach the dynamic-sequence test.
     """
 
     if max_lag_rows < minimum_rows or minimum_rows < 2:
         raise ValueError("payload repeat search bounds are invalid")
-    lanes = np.asarray([lane for lane in range(frames.shape[1]) if lane != counter_lane])
+    lanes = np.asarray(
+        [lane for lane in range(frames.shape[1]) if lane != counter_lane],
+        dtype=np.intp,
+    )
+    activity = tuple(int(lane) for lane in activity_lanes)
+    if (
+        not activity
+        or tuple(sorted(set(activity))) != activity
+        or any(lane < 0 or lane >= frames.shape[1] or lane == counter_lane for lane in activity)
+    ):
+        raise ValueError("payload activity lanes must be sorted, unique, in range, and non-counter")
+    activity_positions = np.searchsorted(lanes, np.asarray(activity, dtype=np.intp))
+    if np.any(activity_positions >= lanes.size) or np.any(lanes[activity_positions] != activity):
+        raise ValueError("payload activity lanes must be included in the matched payload")
     # A deterministic uint64 row hash is only a candidate filter.  Exact word
     # comparison below is the proof and eliminates collision risk.
     weights = (np.arange(lanes.size, dtype=np.uint64) * np.uint64(0x9E3779B185EBCA87)) | 1
@@ -375,12 +449,15 @@ def _payload_repeat_candidates(
     tail_dynamic = np.empty(0, dtype=bool)
     tail_start_row = 0
     prefix_hashes = np.empty(0, dtype=np.uint64)
+    prefix_activity = np.empty((0, len(activity)), dtype=np.uint16)
     for chunk_start in range(0, frames.shape[0], chunk_rows):
         chunk_end = min(frames.shape[0], chunk_start + chunk_rows)
         payload = np.asarray(frames[chunk_start:chunk_end, lanes], dtype=np.uint16)
+        activity_payload = payload[:, activity_positions]
         row_hashes = np.bitwise_xor.reduce(payload.astype(np.uint64) * weights, axis=1)
         prefix_size = prefix_hashes.size
         all_hashes = np.concatenate((prefix_hashes, row_hashes))
+        all_activity = np.concatenate((prefix_activity, activity_payload), axis=0)
         signatures = all_hashes[minimum_rows - 1 :].copy()
         # This is a candidate signature only; every reported event remains
         # byte-confirmed below.  The short fixed loop is over the configured
@@ -390,12 +467,14 @@ def _payload_repeat_candidates(
                 all_hashes[minimum_rows - 1 - offset : all_hashes.size - offset],
                 11 * offset,
             )
-        change_prefix = np.r_[0, np.cumsum(all_hashes[1:] != all_hashes[:-1], dtype=np.int64)]
+        activity_changes = np.any(all_activity[1:] != all_activity[:-1], axis=1)
+        change_prefix = np.r_[0, np.cumsum(activity_changes, dtype=np.int64)]
         endpoints = np.arange(minimum_rows - 1, all_hashes.size)
         signature_dynamic = (
             change_prefix[endpoints] - change_prefix[endpoints - (minimum_rows - 1)]
         ) > 0
         prefix_hashes = all_hashes[-(minimum_rows - 1) :].copy()
+        prefix_activity = all_activity[-(minimum_rows - 1) :].copy()
         # The tail is exactly the candidate horizon.  Sorting a bounded
         # chunk+tail identifies row-hash collisions/replays in C; clean,
         # dynamic recordings therefore avoid a Python dict lookup per row.
@@ -407,6 +486,10 @@ def _payload_repeat_candidates(
         ordered = combined[order]
         pair_rows: list[np.ndarray] = []
         pair_sources: list[np.ndarray] = []
+        proposal_rows: list[np.ndarray] = []
+        proposal_sources: list[np.ndarray] = []
+        proposal_groups: list[tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
+        proposal_count = 0
         group_edges = np.r_[0, np.flatnonzero(ordered[1:] != ordered[:-1]) + 1, ordered.size]
         duplicate_groups = np.flatnonzero(np.diff(group_edges) >= 2)
         if duplicate_groups.size:
@@ -414,37 +497,92 @@ def _payload_repeat_candidates(
             group_ends = group_edges[duplicate_groups + 1]
             tail_rows = tail_signatures.size
             for group_start, group_end in zip(group_starts, group_ends):
-                # ``order`` is hash ordered; restore chronological row order
-                # within each equal-hash group to reproduce the old latest-row
-                # dictionary semantics exactly.
-                positions = np.sort(order[int(group_start) : int(group_end)])
+                # Stable sorting preserves chronological positions inside an
+                # equal-signature group, which is the old latest-row lookup
+                # order.
+                positions = order[int(group_start) : int(group_end)]
                 current_positions = positions[positions >= tail_rows]
                 current_positions = current_positions[combined_dynamic[current_positions]]
                 if not current_positions.size:
                     continue
-                valid_rows: list[int] = []
-                valid_sources: list[int] = []
                 # A held payload produces repeated sequence signatures.  Only
                 # consider sources within the configured horizon and search
                 # newest-first.  Stationary/held signatures were filtered
-                # above, so they cannot turn this into an O(N^2) loop.
-                for current in current_positions:
-                    lower = int(np.searchsorted(positions, current - max_lag_rows, side="left"))
-                    upper = int(np.searchsorted(positions, current - minimum_rows, side="right"))
-                    for source in positions[lower:upper][::-1]:
-                        row = int(combined_start_row + current)
+                # above.  Propose the newest eligible source for every current
+                # position, confirm those proposals in one bounded vector
+                # batch below, and retain the exact older-source fallback for
+                # the rare hash collision.
+                lower = np.searchsorted(
+                    positions,
+                    current_positions - max_lag_rows,
+                    side="left",
+                )
+                upper = np.searchsorted(
+                    positions,
+                    current_positions - minimum_rows,
+                    side="right",
+                )
+                eligible = upper > lower
+                if not np.any(eligible):
+                    continue
+                currents = current_positions[eligible]
+                lower = lower[eligible]
+                upper = upper[eligible]
+                newest_sources = positions[upper - 1]
+                rows = np.asarray(combined_start_row + currents, dtype=np.int64)
+                sources = np.asarray(combined_start_row + newest_sources, dtype=np.int64)
+                proposal_rows.append(rows)
+                proposal_sources.append(sources)
+                proposal_groups.append(
+                    (proposal_count, positions, currents, lower, upper)
+                )
+                proposal_count += rows.size
+        if proposal_rows:
+            proposed_rows = np.concatenate(proposal_rows)
+            proposed_sources = np.concatenate(proposal_sources)
+            newest_matches = _exact_sequence_match_mask(
+                frames,
+                lanes,
+                proposed_rows,
+                proposed_sources,
+                sequence_rows=minimum_rows,
+            )
+            for offset, positions, currents, lower, upper in proposal_groups:
+                group_size = currents.size
+                group_matches = newest_matches[offset : offset + group_size]
+                if np.any(group_matches):
+                    pair_rows.append(
+                        np.asarray(
+                            combined_start_row + currents[group_matches],
+                            dtype=np.int64,
+                        )
+                    )
+                    pair_sources.append(
+                        np.asarray(
+                            combined_start_row + positions[upper[group_matches] - 1],
+                            dtype=np.int64,
+                        )
+                    )
+                fallback_rows: list[int] = []
+                fallback_sources: list[int] = []
+                for current, first, stop in zip(
+                    currents[~group_matches],
+                    lower[~group_matches],
+                    upper[~group_matches] - 1,
+                ):
+                    row = int(combined_start_row + current)
+                    for source in positions[int(first) : int(stop)][::-1]:
                         source_row = int(combined_start_row + source)
-                        lag = row - source_row
                         if np.array_equal(
                             frames[row - minimum_rows + 1 : row + 1, lanes],
                             frames[source_row - minimum_rows + 1 : source_row + 1, lanes],
                         ):
-                            valid_rows.append(row)
-                            valid_sources.append(source_row)
+                            fallback_rows.append(row)
+                            fallback_sources.append(source_row)
                             break
-                if valid_rows:
-                    pair_rows.append(np.asarray(valid_rows, dtype=np.int64))
-                    pair_sources.append(np.asarray(valid_sources, dtype=np.int64))
+                if fallback_rows:
+                    pair_rows.append(np.asarray(fallback_rows, dtype=np.int64))
+                    pair_sources.append(np.asarray(fallback_sources, dtype=np.int64))
         if pair_rows:
             rows = np.concatenate(pair_rows)
             sources = np.concatenate(pair_sources)
@@ -457,33 +595,24 @@ def _payload_repeat_candidates(
         for row_value, source_value in zip(candidate_rows, candidate_sources):
             row = int(row_value)
             source = int(source_value)
-            is_repeat = False
             # Any unpaired row between candidates was a non-repeat in the
             # original streaming implementation and closes its active run.
             if active_start is not None and previous_row != row - 1:
                 candidates.append((active_start, previous_row + 1, active_start - active_source))
                 active_start = None
                 active_source = None
-            left = frames[row - minimum_rows + 1 : row + 1, lanes]
-            right = frames[source - minimum_rows + 1 : source + 1, lanes]
-            # Do not call an arbitrary held payload a repeat.  At least two
-            # rows in the confirmed sequence must differ.
-            dynamic = bool(np.any(left[1:] != left[:-1]))
-            is_repeat = dynamic and np.array_equal(left, right)
-            if is_repeat:
-                expected_source = (
-                    None if active_start is None or active_source is None else active_source + (row - active_start)
-                )
-                if active_start is None or source != expected_source:
-                    if active_start is not None and active_source is not None:
-                        candidates.append((active_start, previous_row + 1, active_start - active_source))
-                    active_start = row
-                    active_source = source
-                previous_row = row
-            if not is_repeat and active_start is not None:
-                candidates.append((active_start, previous_row + 1, active_start - active_source))
-                active_start = None
-                active_source = None
+            # Candidate rows are already dynamic and byte-confirmed above.
+            # Repeating the identical proof here previously doubled millions
+            # of small Python-to-NumPy calls without changing a decision.
+            expected_source = (
+                None if active_start is None or active_source is None else active_source + (row - active_start)
+            )
+            if active_start is None or source != expected_source:
+                if active_start is not None and active_source is not None:
+                    candidates.append((active_start, previous_row + 1, active_start - active_source))
+                active_start = row
+                active_source = source
+            previous_row = row
         tail_size = min(max_lag_rows, combined.size)
         tail_signatures = combined[-tail_size:].copy()
         tail_dynamic = combined_dynamic[-tail_size:].copy()
@@ -717,12 +846,17 @@ def scan_analog_frames(
     chunk_rows: int = 65_536,
     payload_repeat_max_lag_rows: int = 8192,
     payload_repeat_min_rows: int = 3,
+    payload_activity_lanes: Sequence[int] | None = None,
     device_index: int = 1,
 ) -> AnalogIntegrityResult:
     """Scan a sample-major raw analog array without modifying it.
 
     ``frames`` may be a read-only ``numpy.memmap``.  The implementation only
     allocates bounded candidate chunks; source comparisons are slice views.
+    For the default CE64 layout, counter-independent replay activity must occur
+    in zero-based lane 0 through 9.  Exact replay confirmation still includes
+    every non-counter lane.  ``payload_activity_lanes`` can state another
+    explicitly supported layout without inferring lane roles from values.
     """
 
     matrix = np.asarray(frames)
@@ -739,6 +873,22 @@ def scan_analog_frames(
         raise ValueError("minimum run lengths and chunk size are invalid")
     if payload_repeat_max_lag_rows < payload_repeat_min_rows or payload_repeat_min_rows < 2:
         raise ValueError("payload repeat search bounds are invalid")
+    repeat_activity_lanes = (
+        tuple(range(10))
+        if payload_activity_lanes is None
+        else tuple(int(lane) for lane in payload_activity_lanes)
+    )
+    if (
+        not repeat_activity_lanes
+        or tuple(sorted(set(repeat_activity_lanes))) != repeat_activity_lanes
+        or any(
+            lane < 0 or lane >= matrix.shape[1] or lane == counter_lane
+            for lane in repeat_activity_lanes
+        )
+    ):
+        raise ValueError(
+            "payload activity lanes must be sorted, unique, in range, and non-counter"
+        )
     if device_index < 1:
         raise ValueError("device index must be one-based and positive")
 
@@ -915,15 +1065,18 @@ def scan_analog_frames(
     # A fresh counter can conceal an overwrite of the other lanes.  Do a
     # counter-independent dynamic-payload search, but avoid duplicating a
     # stronger full-frame event already explained by counter phase evidence.
-    for start, end, lag in _payload_repeat_candidates(
+    payload_candidates = _payload_repeat_candidates(
         matrix,
         counter_lane=counter_lane,
+        activity_lanes=repeat_activity_lanes,
         max_lag_rows=payload_repeat_max_lag_rows,
         minimum_rows=payload_repeat_min_rows,
         chunk_rows=chunk_rows,
+    )
+    for start, end, lag in _payload_candidates_without_overlap(
+        payload_candidates,
+        timeline_events,
     ):
-        if any(start < event.raw_end_row and event.raw_start_row < end for event in timeline_events):
-            continue
         timeline_events.append(
             AnalogIntegrityEvent(
                 kind="repeat_overwrite",

@@ -1286,7 +1286,7 @@ def run_multidevice_sync(
             if progress is not None:
                 progress(
                     "refine_sync",
-                    100.0 * refined_count / len(slave_indices),
+                    80.0 * refined_count / len(slave_indices),
                 )
 
         performance.end("full_rate_refinement")
@@ -1570,6 +1570,8 @@ def run_multidevice_sync(
             )
         )
     performance.end("attribution_segment_construction")
+    if progress is not None:
+        progress("refine_sync", 100.0)
     duplication_scans: dict[int, dict[str, object]] = {}
     performance.set_workers(duplication_workers=0)
     if progress is not None:
@@ -1597,7 +1599,7 @@ def run_multidevice_sync(
                     if progress is not None:
                         progress(
                             "integrity_scan",
-                            100.0 * completed_scans / len(recordings),
+                            50.0 * completed_scans / len(recordings),
                         )
         except BaseException:
             performance.end(
@@ -1637,9 +1639,9 @@ def run_multidevice_sync(
                     device_index=device_index + 1,
                     canonicalize_current_sample=to_canonical,
                 )
-            )
-    if progress is not None:
-        progress("integrity_scan", 100.0)
+                )
+    elif progress is not None:
+        progress("integrity_scan", 50.0)
     temporary_owner.cleanup()
     classified_intervals = list(merge_compatible_intervals(classified_intervals))
 
@@ -1665,8 +1667,16 @@ def run_multidevice_sync(
                     ): device_index
                     for device_index, recording in enumerate(recordings)
                 }
+                completed_analog_scans = 0
                 for future in as_completed(futures):
                     analog_integrity_by_device[futures[future]] = future.result()
+                    completed_analog_scans += 1
+                    if progress is not None:
+                        progress(
+                            "integrity_scan",
+                            50.0
+                            + 50.0 * completed_analog_scans / len(recordings),
+                        )
     except BaseException:
         performance.end(
             "analog_integrity_scan",
@@ -1679,6 +1689,8 @@ def run_multidevice_sync(
             "analog_integrity_scan",
             bytes_read=input_bytes["analogin.dat"],
         )
+    if progress is not None:
+        progress("integrity_scan", 100.0)
     analog_integrity_results = (
         [analog_integrity_by_device[index] for index in range(len(recordings))]
         if analog_authority_enabled
@@ -1967,6 +1979,8 @@ def run_multidevice_sync(
 
             postmerge = validate_current_stage()
             correlation_postmerge = postmerge
+            if progress is not None:
+                progress("postmerge_qc", 25.0)
             if postmerge.status == "WARN":
                 postmerge_warning_messages.append(postmerge.message)
                 proposed_postmerge_corrections = infer_postmerge_segment_corrections(
@@ -2010,9 +2024,20 @@ def run_multidevice_sync(
                         device_source_steps=result.device_source_steps,
                         device_terminal_support=result.device_terminal_support,
                         device_sync_segments=result.device_sync_segments,
-                        progress=progress,
+                        progress=(
+                            (
+                                lambda _stage, percent: progress(
+                                    "postmerge_qc",
+                                    25.0 + 50.0 * percent / 100.0,
+                                )
+                            )
+                            if progress is not None
+                            else None
+                        ),
                     )
                     postmerge = validate_current_stage()
+                    if progress is not None:
+                        progress("postmerge_qc", 80.0)
                     if postmerge.status == "WARN":
                         postmerge_warning_messages.append(postmerge.message)
             if postmerge is not None and postmerge.publishable:
@@ -2069,6 +2094,8 @@ def run_multidevice_sync(
                         "alignment_quality_summary": alignment_summary,
                     }
                 )
+                if progress is not None:
+                    progress("postmerge_qc", 95.0)
         performance.end("postmerge_validation")
         if progress is not None:
             progress("postmerge_qc", 100.0)
@@ -2272,6 +2299,8 @@ def run_multidevice_sync(
                             "legacy fallback for non-WILD 16-channel analog layout"
                         )
                     }
+                if progress is not None:
+                    progress("pc_time", 35.0)
                 inspection_pc_time = pc_model
                 pc_validation = validate_canonical_pc_time_interval(
                     pc_model,
@@ -2329,6 +2358,8 @@ def run_multidevice_sync(
                     n_samples=int(merge_info["n_samples"]),
                     sample_rate_hz=master.fs,
                 )
+                if progress is not None:
+                    progress("pc_time", 50.0)
                 component["pc_time_status"] = pc_validation.status
                 if pc_validation.publishable:
                     write_canonical_interval_pc_time(
@@ -2338,7 +2369,12 @@ def run_multidevice_sync(
                         canonical_start_sample=int(merge_info["common_start_master_sample"]),
                         n_samples=int(merge_info["n_samples"]),
                         progress=(
-                            (lambda percent: progress("pc_time", percent))
+                            (
+                                lambda percent: progress(
+                                    "pc_time",
+                                    50.0 + 45.0 * percent / 100.0,
+                                )
+                            )
                             if progress is not None
                             else None
                         ),
@@ -2374,6 +2410,8 @@ def run_multidevice_sync(
                     n_samples=int(merge_info["n_samples"]),
                     sample_rate_hz=master.fs,
                 )
+                if progress is not None:
+                    progress("pc_time", 95.0)
             performance.end(
                 "pc_time_generation",
                 bytes_written=(
@@ -2402,6 +2440,7 @@ def run_multidevice_sync(
                     "reason": imu_skip_reason,
                 }
                 if progress is not None:
+                    progress("imu", 0.0)
                     progress("imu", 100.0)
 
         if imu_generation_enabled:
