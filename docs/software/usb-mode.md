@@ -20,7 +20,7 @@ USB mode is separate from normal microSD logging. Connecting VBUS does not selec
 
 1. Start WILD Console and connect to the logger on the **Online** tab.
 2. Stop any active recording or preview.
-3. Open **Advanced** and issue the resident USB-service command. In WILD Console 3.4.2.144, the shared control is labelled **Enable CE128 USB ephys**; it is the V4 resident-service handoff used by compatible WILD/CE64 images.
+3. Open **Advanced** and issue the resident USB-service command. In WILD Console 3.4.2.145, the shared control is labelled **Enable CE128 USB ephys**; it is the V4 resident-service handoff used by compatible WILD/CE64 images.
 4. Confirm the prompt. The BLE connection closes while the device resets into the USB service; this is expected.
 5. Open the **USB** tab, connect the USB data cable, and click **Refresh**.
 6. Select the CRC-validated CE64/WILD64 device from **CE64 V4 USB device**.
@@ -118,4 +118,3 @@ The preserved configuration sector is not contained in the fused HEX and is not 
 | Normal install is disabled | A V4 bootloader/control service was not detected. Reconnect the V4 service, or use full flash only with a complete fused HEX and the target in ROM DFU. |
 | USB recording stops by itself | Check the status/log for non-zero lossless counters. Do not use the partial run as validated data. |
 | Device does not return to BLE logging | Stop active USB operations, use **Enter logger mode**, and wait for the normal application to boot. |
-
