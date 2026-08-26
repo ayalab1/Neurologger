@@ -1,6 +1,6 @@
 {
   "version": "3.4.2.146",
-  "url": "https://raw.githubusercontent.com/ayalab1/Neurologger/7b5af5c/Software/wild_console_Setup_3.4.2.146.exe",
-  "sha256": "9C0E2CCF5EECF7C667C86F3FF047AE7981FC1B270B2F41AD20372105D23871CE",
+  "url": "https://raw.githubusercontent.com/ayalab1/Neurologger/26d2d7748acfc57273566c7cefb7bc871798deac/Software/wild_console_Setup_3.4.2.146.exe",
+  "sha256": "237B22150FDC5CBB85978658AA74F940A37B43AB0BFB4D8C8F1A3BEEC4B7AC93",
   "notes": "BLE host selection and connection cleanup, direct USB/DFU firmware workflows, fused-HEX BLE OTA, and complete device error decoding."
 }
