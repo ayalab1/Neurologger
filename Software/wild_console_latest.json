@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.145",
-  "url": "https://github.com/ayalab1/Neurologger/releases/download/WILD_API_3_4_2_145/wild_console_Setup_3.4.2.145.exe",
-  "sha256": "2A7A7FBB19D4335D1CD11987B48746EBAB699B04460A34577469D1308E5B7C07",
-  "notes": "CE64 FM57 fused images, V4 single-HEX USB update, and impedance/EIS workflows."
+  "version": "3.4.2.146",
+  "url": "https://github.com/ayalab1/Neurologger/releases/download/WILD_API_3_4_2_146/wild_console_Setup_3.4.2.146.exe",
+  "sha256": "9C0E2CCF5EECF7C667C86F3FF047AE7981FC1B270B2F41AD20372105D23871CE",
+  "notes": "BLE host selection and connection cleanup, direct USB/DFU firmware workflows, fused-HEX BLE OTA, and complete device error decoding."
 }
