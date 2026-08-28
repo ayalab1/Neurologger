@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.150",
-  "url": "https://github.com/ayalab1/Neurologger/raw/4a644dededde08a6613545e80ff035c10eda3a57/Software/wild_console_Setup_3.4.2.150.exe",
-  "sha256": "40F985B03E3A25936EB508C6D525C33C23985ADA903650C1DFF8EA82F1761A98",
-  "notes": "Adds the Scheduler workspace for autonomous recording profiles and low-power rules, with serialized A8/A9 BLE transport and FM59 fused firmware bundled."
+  "version": "3.4.2.151",
+  "url": "https://github.com/ayalab1/Neurologger/raw/bca4c831b78392ea99251ece2878f938f5cf3681/Software/wild_console_Setup_3.4.2.151.exe",
+  "sha256": "106A8FB1BE76F3FC025D5E5B144C59BBFDC7F4D21D6C499628A18961E5539EB1",
+  "notes": "Hotfixes Scheduler BLE transactions and connection recovery, and bundles the validated FM60 HW1/HW2 Auto, Master, and Slave fused firmware images."
 }
