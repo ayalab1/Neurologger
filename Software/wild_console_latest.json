@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.148",
-  "url": "https://raw.githubusercontent.com/ayalab1/Neurologger/bbf8463a3670fc7dcab7671a54ac71f204014b12/Software/wild_console_Setup_3.4.2.148.exe",
-  "sha256": "B4F79604552FCCB2506D412B201E81C04CC1485CC3AE96CD656C00EC4358AE2C",
-  "notes": "Bounded automatic BLE sync recovery and reliable preview re-arm after recording start, plus the integrated spike and closed-loop viewers."
+  "version": "3.4.2.150",
+  "url": "https://github.com/ayalab1/Neurologger/raw/4a644dededde08a6613545e80ff035c10eda3a57/Software/wild_console_Setup_3.4.2.150.exe",
+  "sha256": "40F985B03E3A25936EB508C6D525C33C23985ADA903650C1DFF8EA82F1761A98",
+  "notes": "Adds the Scheduler workspace for autonomous recording profiles and low-power rules, with serialized A8/A9 BLE transport and FM59 fused firmware bundled."
 }
