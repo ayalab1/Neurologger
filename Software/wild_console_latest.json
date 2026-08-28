@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.152",
-  "url": "https://github.com/ayalab1/Neurologger/raw/5d2630d13c6d8353d34c113e3cb62603de7d5294/Software/wild_console_Setup_3.4.2.152.exe",
-  "sha256": "13122380858E4A35DE242660180DB0B38B45CD47EE851C78752DD3F299B5E974",
-  "notes": "Hardens fused CE64 SD firmware staging with HW/role validation, WILD-card enforcement, exclusive flush/read-back verification, and source-to-card audit receipts."
+  "version": "3.4.2.153",
+  "url": "https://github.com/ayalab1/Neurologger/raw/a8ffc6d6fc59504b182cd16cfc2d0c7a53a061bf/Software/wild_console_Setup_3.4.2.153.exe",
+  "sha256": "37B1E76B5B27AF693BDD4DB7B716302DE209D0D8F9BDA69D15731F4B19A4D94F",
+  "notes": "Fixes CE64 BLE firmware-update acknowledgement parsing so valid device replies no longer time out or fail as malformed, while retaining the 3.4.2.152 fused-SD staging safeguards."
 }
