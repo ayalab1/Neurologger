@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.151",
-  "url": "https://github.com/ayalab1/Neurologger/raw/bca4c831b78392ea99251ece2878f938f5cf3681/Software/wild_console_Setup_3.4.2.151.exe",
-  "sha256": "106A8FB1BE76F3FC025D5E5B144C59BBFDC7F4D21D6C499628A18961E5539EB1",
-  "notes": "Hotfixes Scheduler BLE transactions and connection recovery, and bundles the validated FM60 HW1/HW2 Auto, Master, and Slave fused firmware images."
+  "version": "3.4.2.152",
+  "url": "https://github.com/ayalab1/Neurologger/raw/5d2630d13c6d8353d34c113e3cb62603de7d5294/Software/wild_console_Setup_3.4.2.152.exe",
+  "sha256": "13122380858E4A35DE242660180DB0B38B45CD47EE851C78752DD3F299B5E974",
+  "notes": "Hardens fused CE64 SD firmware staging with HW/role validation, WILD-card enforcement, exclusive flush/read-back verification, and source-to-card audit receipts."
 }
