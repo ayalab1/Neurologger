@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.153",
-  "url": "https://github.com/ayalab1/Neurologger/raw/a8ffc6d6fc59504b182cd16cfc2d0c7a53a061bf/Software/wild_console_Setup_3.4.2.153.exe",
-  "sha256": "37B1E76B5B27AF693BDD4DB7B716302DE209D0D8F9BDA69D15731F4B19A4D94F",
-  "notes": "Fixes CE64 BLE firmware-update acknowledgement parsing so valid device replies no longer time out or fail as malformed, while retaining the 3.4.2.152 fused-SD staging safeguards."
+  "version": "3.4.2.154",
+  "url": "https://github.com/ayalab1/Neurologger/raw/30041659dbea9f542b7985322c0a8a969026df1f/Software/wild_console_Setup_3.4.2.154.exe",
+  "sha256": "3A4CFD048BCF72D92F39A3BEE474F2447A0918EF3A7E6F9E0C6244C64909501F",
+  "notes": "Prevents active CE64 precision synchronization from being restarted by the former ten-second host watchdog on slow or noisy links, and reports a missing record-start acknowledgement as confirmation pending rather than a proven recording failure."
 }
