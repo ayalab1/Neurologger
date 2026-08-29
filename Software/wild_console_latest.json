@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.154",
-  "url": "https://github.com/ayalab1/Neurologger/raw/30041659dbea9f542b7985322c0a8a969026df1f/Software/wild_console_Setup_3.4.2.154.exe",
-  "sha256": "3A4CFD048BCF72D92F39A3BEE474F2447A0918EF3A7E6F9E0C6244C64909501F",
-  "notes": "Prevents active CE64 precision synchronization from being restarted by the former ten-second host watchdog on slow or noisy links, and reports a missing record-start acknowledgement as confirmation pending rather than a proven recording failure."
+  "version": "3.4.2.155",
+  "url": "https://github.com/ayalab1/Neurologger/raw/c4091c73f5a3923316bfa918e26f4a29cde60096/Software/wild_console_Setup_3.4.2.155.exe",
+  "sha256": "AA615376C01BC1D0323DC336D6510310100F330CBA8288674CD014312284D5A0",
+  "notes": "Packages validated CE64 FM61 HW1/HW2 Auto/Master/Slave fused firmware and includes scheduler UI, fused-SD staging, BLE OTA acknowledgement, and active-sync completion fixes."
 }
