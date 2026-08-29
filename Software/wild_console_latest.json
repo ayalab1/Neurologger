@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.155",
-  "url": "https://github.com/ayalab1/Neurologger/raw/c4091c73f5a3923316bfa918e26f4a29cde60096/Software/wild_console_Setup_3.4.2.155.exe",
-  "sha256": "AA615376C01BC1D0323DC336D6510310100F330CBA8288674CD014312284D5A0",
-  "notes": "Packages validated CE64 FM61 HW1/HW2 Auto/Master/Slave fused firmware and includes scheduler UI, fused-SD staging, BLE OTA acknowledgement, and active-sync completion fixes."
+  "version": "3.4.2.157",
+  "url": "https://github.com/ayalab1/Neurologger/raw/05108cd750aefb7c39b084f8900ae6afb3619d3c/Software/wild_console_Setup_3.4.2.157.exe",
+  "sha256": "8AABE1E28F3F585242228DCD48378B42635C9981073435D4DF11C982DC3BBE6B",
+  "notes": "Packages validated CE64 FM61 HW1/HW2 Auto/Master/Slave fused firmware and includes recorder-safe observer defaults plus reset-aware BLE OTA install acknowledgement recovery."
 }
