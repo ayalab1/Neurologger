@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.158",
-  "url": "https://github.com/ayalab1/Neurologger/raw/3dd94a7b8178cd2e959bb0ee14af8878ed73e1a3/Software/wild_console_Setup_3.4.2.158.exe",
-  "sha256": "A34AE10777964EB205B3F0B61C57AAA4C53109846C70B9E24CF84AFFEC836FC1",
-  "notes": "Bundles validated CE64 FM62 HW1/HW2 Auto/Master/Slave fused firmware, recorder-safe observer defaults, and reset-aware BLE OTA install acknowledgement recovery."
+  "version": "3.4.2.159",
+  "url": "https://github.com/ayalab1/Neurologger/raw/7d0421a422c2659ff7d089014b2580b77bfd5cfb/Software/wild_console_Setup_3.4.2.159.exe",
+  "sha256": "C8ED97ADF5B5764F44A8E42AD734C5213B7EE3690096EB035BC8BC0D767CCB5C",
+  "notes": "Restores SD update staging for canonical FM55-and-earlier V4 fused HEX files and waits for the logger's own reboot/disconnect before bounded host cleanup. Bundles the validated CE64 FM62 HW1/HW2 Auto/Master/Slave firmware set."
 }
