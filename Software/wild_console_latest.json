@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.161",
-  "url": "https://github.com/ayalab1/Neurologger/raw/6d20837454c148b6f540cccc430efac7dd0b11b2/Software/wild_console_Setup_3.4.2.161.exe",
-  "sha256": "F5E56FF82CB7E530CFEF5A953BF7C6D4CE85C929C888720E1C4FBC23A0336F6C",
-  "notes": "Adds an armed recovery path for interrupted V4 USB updates: choose the exact fused HEX, arm recovery, then unplug/replug the only target. The console captures the short-lived CRC-valid C64M disk, enters ROM DFU, and programs and verifies the full package. SD install remains available over a connected but unsynchronized FM55 GATT session."
+  "version": "3.4.2.162",
+  "url": "https://github.com/ayalab1/Neurologger/raw/72d121f1b371f70c40f64dabf75ead49159e5a4b/Software/wild_console_Setup_3.4.2.162.exe",
+  "sha256": "33E8106379048B1A5A1B98615EAC66710580F3738330605EE7477BC2DFCBFC3F",
+  "notes": "Completes existing-DFU enumeration before arming interrupted-V4 recovery, so the short-lived C64M USB disk is captured immediately after unplug/replug. The console then enters ROM DFU and fully programs and verifies the exact fused HEX. SD install remains available over a connected but unsynchronized FM55 GATT session."
 }
