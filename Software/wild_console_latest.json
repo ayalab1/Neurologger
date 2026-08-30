@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.160",
-  "url": "https://github.com/ayalab1/Neurologger/raw/79df60dafbb90877214189acd87b7e211a953642/Software/wild_console_Setup_3.4.2.160.exe",
-  "sha256": "8423B6BB041559B83E307C5B18FCDF6DC40B623A0FAECE1D30F32E44B20EE956",
-  "notes": "Adds an explicit two-step V4/FM55 recovery workflow: prepare and byte-verify the fused HEX on a PC-mounted WILD card, then reinsert it and request installation over BLE. Directs legacy long-frame BLE OTA timeouts to this safe SD path and retains the validated CE64 FM62 HW1/HW2 Auto/Master/Slave firmware set."
+  "version": "3.4.2.161",
+  "url": "https://github.com/ayalab1/Neurologger/raw/6d20837454c148b6f540cccc430efac7dd0b11b2/Software/wild_console_Setup_3.4.2.161.exe",
+  "sha256": "F5E56FF82CB7E530CFEF5A953BF7C6D4CE85C929C888720E1C4FBC23A0336F6C",
+  "notes": "Adds an armed recovery path for interrupted V4 USB updates: choose the exact fused HEX, arm recovery, then unplug/replug the only target. The console captures the short-lived CRC-valid C64M disk, enters ROM DFU, and programs and verifies the full package. SD install remains available over a connected but unsynchronized FM55 GATT session."
 }
