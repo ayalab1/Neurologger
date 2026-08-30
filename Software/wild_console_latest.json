@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.162",
-  "url": "https://github.com/ayalab1/Neurologger/raw/72d121f1b371f70c40f64dabf75ead49159e5a4b/Software/wild_console_Setup_3.4.2.162.exe",
-  "sha256": "33E8106379048B1A5A1B98615EAC66710580F3738330605EE7477BC2DFCBFC3F",
-  "notes": "Completes existing-DFU enumeration before arming interrupted-V4 recovery, so the short-lived C64M USB disk is captured immediately after unplug/replug. The console then enters ROM DFU and fully programs and verifies the exact fused HEX. SD install remains available over a connected but unsynchronized FM55 GATT session."
+  "version": "3.4.2.163",
+  "url": "https://github.com/ayalab1/Neurologger/releases/download/wild-console-3.4.2.163/wild_console_Setup_3.4.2.163.exe",
+  "sha256": "6AAE2856D75DF14C3004088F8ABCF4A0B6A4E209E373C00350FC2F74A9123222",
+  "notes": "V55-compatible BLE OTA with live progress and validated fused-HEX/SD rescue staging."
 }
