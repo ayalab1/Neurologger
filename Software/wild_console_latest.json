@@ -1,6 +1,6 @@
 {
   "version": "3.4.2.163",
-  "url": "https://github.com/ayalab1/Neurologger/releases/download/wild-console-3.4.2.163/wild_console_Setup_3.4.2.163.exe",
+  "url": "https://github.com/ayalab1/Neurologger/raw/2dd0d70b2fcd6b1cd1e6e1f495674da204741d61/Software/wild_console_Setup_3.4.2.163.exe",
   "sha256": "6AAE2856D75DF14C3004088F8ABCF4A0B6A4E209E373C00350FC2F74A9123222",
   "notes": "V55-compatible BLE OTA with live progress and validated fused-HEX/SD rescue staging."
 }
