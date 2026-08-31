@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.163",
-  "url": "https://github.com/ayalab1/Neurologger/raw/2dd0d70b2fcd6b1cd1e6e1f495674da204741d61/Software/wild_console_Setup_3.4.2.163.exe",
-  "sha256": "6AAE2856D75DF14C3004088F8ABCF4A0B6A4E209E373C00350FC2F74A9123222",
-  "notes": "V55-compatible BLE OTA with live progress and validated fused-HEX/SD rescue staging."
+  "version": "3.4.2.165",
+  "url": "https://github.com/ayalab1/Neurologger/raw/042f140da16d198d99e4039207afa837e8132e05/Software/wild_console_Setup_3.4.2.165.exe",
+  "sha256": "3423350E037AB1D134FCA7096DD0721630F5E6FBF7B9899E744C018A38609BB7",
+  "notes": "Reviewer-approved spike/closed-loop BLE reliability, recoverable BLE OTA with Abort/speed/ETA, V55-compatible fused-HEX/SD recovery, and bundled FM63 images."
 }
