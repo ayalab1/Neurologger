@@ -26,5 +26,6 @@ change_log/
 implementation_plan/
 Firmware/*
 !Firmware/CE64_V4_FM*.hex
+!Firmware/CE64_V5_FM*.hex
 !Firmware/README.md
 _codex_reference_validation/
