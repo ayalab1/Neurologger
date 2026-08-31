@@ -25,4 +25,6 @@ Code/WILD_preprocess_gui/*.local*.png
 change_log/
 implementation_plan/
 Firmware/*
+!Firmware/CE64_V4_FM*.hex
+!Firmware/README.md
 _codex_reference_validation/
