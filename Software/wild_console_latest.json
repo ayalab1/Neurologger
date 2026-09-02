@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.165",
-  "url": "https://github.com/ayalab1/Neurologger/raw/042f140da16d198d99e4039207afa837e8132e05/Software/wild_console_Setup_3.4.2.165.exe",
-  "sha256": "3423350E037AB1D134FCA7096DD0721630F5E6FBF7B9899E744C018A38609BB7",
-  "notes": "Reviewer-approved spike/closed-loop BLE reliability, recoverable BLE OTA with Abort/speed/ETA, V55-compatible fused-HEX/SD recovery, and bundled FM63 images."
+  "version": "3.4.2.166",
+  "url": "https://github.com/ayalab1/Neurologger/raw/47fc54bb12c01d109cd5b2bdddf1af9d771e80b6/Software/wild_console_Setup_3.4.2.166.exe",
+  "sha256": "613D8A64D5FDF28BD63871D09941875AEA5E54397DE8EF1FB0081424F791A856",
+  "notes": "Record Stop now bypasses pending Start/state waits, uses bounded priority transport, and remains retryable when its BLE acknowledgement is lost. The installer bundles the six validated FM65 V5 HW/role images."
 }
