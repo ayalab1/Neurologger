@@ -39,7 +39,7 @@ Software documentation covers how to connect to the WILD device, configure recor
 
 ## Install
 
-Download WILD Console from the [latest GitHub release](https://github.com/ayalab1/Neurologger/releases/latest). The link always opens the newest public WILD release.
+Download [WILD Console 3.4.2.169](https://github.com/ayalab1/Neurologger/raw/main/Software/wild_console_Setup_3.4.2.169.exe). Existing installations can also use the Console's update prompt. Device firmware is available from the [latest firmware release](https://github.com/ayalab1/Neurologger/releases/latest).
 
 ## Public Workflow Boundary
 

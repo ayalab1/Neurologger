@@ -39,6 +39,32 @@ Auxiliary previews help confirm IMU activity, digital input edges, stimulation m
 
 For timing-sensitive triggers, combine live monitoring with exported files and the synchronization procedures documented in [Data Format](data-format.md). Live display timing is useful for operator feedback, but exported event timestamps and correction records are used for analysis.
 
+## Triggered CL Waveforms and Spectra (.169)
+
+1. Connect the logger and configure its filter/threshold in **Closed-loop Settings**.
+2. Open **CL events**, which replaces the old Triggered Waveform checkbox.
+3. Enable **Capture live CL1 + CL2** to view received trigger events.
+
+The upper two panels show the 256-sample CL1/CL2 waveforms. The lower panels
+show their PC-computed Gabor time-frequency displays. Waveform scales are
+independent and expressed in microvolts (0.195 uV/count). Each lane has a
+received-event counter and retains 20 waveforms; **Clear** removes the visible
+history without resetting those counters.
+
+![CL events viewer with simulated 60 Hz and 150 Hz waveforms](../images/closed-loop-spectrum-169.png){ .wild-readable-figure }
+
+The screenshot uses simulated signals, not a live logger. Spectrum processing
+runs outside the UI thread, with one calculation and one newest pending event
+per lane. A spectrum can lag the waveform during bursts; its event label tells
+you which event it represents. Host event counts are not a guarantee that BLE
+delivered every device trigger.
+
+PC-side zero padding makes the frequency grid denser but does not increase
+the physical frequency resolution of the short captured window. Build and
+offline 8/60/150 Hz tests passed; end-to-end current-device CL validation is
+pending. This release does not enable the separate continuous MCU spectrum
+mode and does not change the firmware or SD recording pathway.
+
 ## Camera Preview
 
 Camera preview is useful for checking field of view, lighting, gross focus, and cable stability before a session. Camera characterization, working distance, and sensor hardware are documented in [Onboard Sensors](../hardware/onboard-sensors.md#camera).
