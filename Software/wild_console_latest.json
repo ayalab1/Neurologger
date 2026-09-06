@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.166",
-  "url": "https://github.com/ayalab1/Neurologger/raw/47fc54bb12c01d109cd5b2bdddf1af9d771e80b6/Software/wild_console_Setup_3.4.2.166.exe",
-  "sha256": "613D8A64D5FDF28BD63871D09941875AEA5E54397DE8EF1FB0081424F791A856",
-  "notes": "Record Stop now bypasses pending Start/state waits, uses bounded priority transport, and remains retryable when its BLE acknowledgement is lost. The installer bundles the six validated FM65 V5 HW/role images."
+  "version": "3.4.2.169",
+  "url": "https://github.com/ayalab1/Neurologger/raw/9ee7ce4bd2ee734d2e22e76d5278da15fec81251/Software/wild_console_Setup_3.4.2.169.exe",
+  "sha256": "C94F79B8259C38D88A0E891913EBA928FC68CE99E30C6149B5ECF6FB4914ABAD",
+  "notes": "Adds a four-panel CL events viewer with triggered waveforms, bounded PC-side Gabor spectra, independent microvolt scales and received-event counters. Includes scheduler reply/reconnect and MISC export fixes. Existing FM65 V5 firmware images are unchanged. Build, offline spectrum tests and source review passed; live-device CL validation remains pending. Separate continuous MCU spectrum mode is not enabled."
 }
