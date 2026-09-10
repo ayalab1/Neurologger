@@ -1,0 +1,2 @@
+# Generated release artifacts: preserve exact download bytes and SHA256 sums.
+*.hex -text
