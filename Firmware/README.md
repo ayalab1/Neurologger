@@ -1,8 +1,11 @@
 # CE64 firmware releases
 
 The six `CE64_V5_FM66_*_20260910.hex` files are the latest user-requested fused
-release. **Read [FM66 release notes](FM66_RELEASE_NOTES.md) before deployment:
-ADC startup zeros remain unresolved and the new paired endurance test is pending.**
+release, replaced in place with the `20260910_peerclock1` UART clock fix.
+Version and filenames remain FM66 by request; check `FM66_SHA256SUMS.txt` to
+identify the replacement. The paired 30-second 20 kHz/64 MHz test passed.
+**Read [FM66 release notes](FM66_RELEASE_NOTES.md) before deployment:
+ADC startup zeros remain unresolved and the one-hour paired test is pending.**
 FM66 must not be treated as an error-free, fully validated production image.
 Each file contains Bootloader V5, the application manifest, the CE64
 application, and the resident V4-compatible USB service image.
@@ -17,7 +20,9 @@ the SD rail before probing. The application publishes a recoverable directory
 checkpoint every five minutes at a completed allocation-unit boundary.
 
 FM66 adds DMA-backed slow AUX telemetry during high-speed ADC and UART receive
-robustness. Its 120-second development test demonstrated changing AUX and
+robustness. This replacement also retimes the peer UART after BLE-preserving
+clock changes, fixing the observed Master/Slave command-delivery failure.
+Its 120-second development test demonstrated changing AUX and
 clean recording stop, but saved ADC data had at least 38.4 ms of startup zeros.
 Battery freshness during high-speed ADC, ADC-off AUX, analog accuracy, and
 full chronology remain unvalidated. No new Console installer accompanies FM66;

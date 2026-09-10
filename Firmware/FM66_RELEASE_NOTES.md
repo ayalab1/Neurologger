@@ -4,6 +4,47 @@ User-requested versioned release before the new paired endurance test.
 **Known limitations remain; this is not an error-free or fully endurance-
 validated release. FM65 remains the prior validated baseline.**
 
+## Same-version replacement: peer UART clock fix
+
+At the user's request, the six current FM66 HEX files were replaced without
+incrementing FM. Build stamp `20260910_peerclock1`, generation `1789074246`;
+use the updated SHA256 sums to distinguish this replacement from original FM66.
+Public filenames are unchanged. Both versions report FM66.
+
+Firmware source: CE64 commit `b52e3ca2a5bde65797322639cfd00e9e901cb011`
+on branch `V1.6`.
+
+The BLE-preserving clock-transition path previously skipped retiming the peer
+UART. On a Slave at 64 MHz APB2, USART6 retained BRR=0xD0 from 24 MHz, producing
+about 307692 baud instead of 115200. The replacement updates the divider from
+the actual APB clock, fences new peer transmissions during clock changes, and
+waits for active TX to finish before applying the divider. Queues and RX state
+are preserved. This omission predates FM66.
+
+No sampling clocks, Intan timing/DMA, ADC policy, SD housekeeping, recording
+format, or recorder allocations were changed. Bootloader core bytes are
+unchanged; the resident USB service was rebuilt with the shared control source.
+
+Validation of the exact replacement:
+
+- Six-variant build, source/model gates, role-preserving update fixture and
+  independent recording/control and packaging reviews passed.
+- All variants retain 245248-byte recorder arena, 327168/327680-byte static
+  RAM use, and 608-byte reported stack margin.
+- Both mapped HW2 Master/Slave devices passed full flash verification.
+- Slave hardware readback at 64 MHz confirms BRR=0x22C (~115108 baud).
+- Master-only 30-second, 20 kHz ephys, ADC/camera OFF test passed on both:
+  166808 total sectors / 158616 payload sectors each, representing 624704
+  stored frames per channel. Both distributed 16-sector payload checks passed
+  CRC, raw-content and bank-alignment checks. Slave was idle after Master Stop.
+- Slave received 19 additional valid peer messages with zero new RX failures.
+- One-hour endurance started September 10 at 17:13 EDT and remains pending
+  at publication. Equal stored slots and sparse CRC are not full chronology
+  proof. All ADC and other limitations below remain in force.
+
+HW2 Master fused SHA256: `f959fc189dacada20ebf2f53c62c35e93a06460fc162f9c27b4458c5fafb169e`.
+HW2 Slave fused SHA256: `b80f557a09c737a0605e3b8e779848d4bf2edd35ff3dc9691877ff0e8855dde6`.
+
 ## Scope
 
 - AUX/PA0 slow cache and MISC telemetry can reuse completed regular ADC DMA
@@ -21,7 +62,8 @@ validated release. FM65 remains the prior validated baseline.**
   BLE configuration/rebind reapplies the same framing.
 - Intan timer/SPI cadence, SD housekeeping, recorder allocations, file widths,
   and the five-minute allocation-unit-boundary checkpoint policy are unchanged.
-- Bootloader V5 and its compatible resident service are unchanged in source.
+- Bootloader V5 core is unchanged; the compatible resident service includes
+  the shared peer-UART clock correction described above.
 
 This release is isolated from unrelated USB/AI/impedance work in the primary
 development checkout. Six separate HW1/HW2 x Auto/Master/Slave fused HEX files
