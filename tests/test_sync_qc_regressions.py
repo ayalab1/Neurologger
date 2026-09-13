@@ -248,13 +248,27 @@ class SyncQcRegressionTest(unittest.TestCase):
         self.assertNotIn("clock discontinuity", message)
         self.assertIn("nonblocking persistent offset level shift 8.0", message)
 
-    def test_large_single_jump_still_fails_after_detrending(self) -> None:
+    def test_model_outlier_does_not_fail_later_discontinuity_validation(self) -> None:
         options = SyncOptions()
         observations = _observations([0.0] * 10 + [80.0] + [0.0] * 10)
         model = fit_affine_sync_model(observations, fs=20_000, options=options)
         status, message = validate_pair(_initial(), observations, model, options)
-        self.assertEqual(status, "FAIL")
-        self.assertIn("detrended offset step", message)
+        self.assertEqual(sum(not observation.model_inlier for observation in observations), 1)
+        self.assertEqual(status, "OK")
+        self.assertNotIn("persistent offset level shift", message)
+        self.assertNotIn("detrended offset step", message)
+
+    def test_wt4_day11_endpoint_model_outlier_does_not_fail_pair(self) -> None:
+        options = SyncOptions()
+        observations = _observations([228.0] + [25.0] * 19)
+        observations[0].search_mode = "endpoint_probe_wide"
+        model = fit_affine_sync_model(observations, fs=20_000, options=options)
+        status, message = validate_pair(_initial(), observations, model, options)
+        self.assertFalse(observations[0].model_inlier)
+        self.assertTrue(all(item.model_inlier for item in observations[1:]))
+        self.assertEqual(status, "OK")
+        self.assertNotIn("persistent offset level shift", message)
+        self.assertNotIn("detrended offset step", message)
 
     def test_shorter_slave_endpoint_is_excluded_from_observation_denominator(self) -> None:
         fs = 100

@@ -50,7 +50,11 @@ def _persistent_offset_level_shift(
     clean affine drift has zero residual step regardless of its clock rate.
     """
 
-    accepted = [observation for observation in observations if observation.accepted]
+    accepted = [
+        observation
+        for observation in observations
+        if observation.accepted and observation.model_inlier
+    ]
     times = np.asarray([observation.center_time_sec for observation in accepted], dtype=np.float64)
     residuals = np.asarray(
         [
@@ -188,7 +192,7 @@ def validate_pair(
     accepted_residual_offsets = [
         observation.observed_offset_samples - model.offset_at_seconds(observation.center_time_sec)
         for observation in observations
-        if observation.accepted
+        if observation.accepted and observation.model_inlier
     ]
     max_offset_step = max(
         (
