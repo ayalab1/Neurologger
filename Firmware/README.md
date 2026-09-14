@@ -1,40 +1,46 @@
 # CE64 firmware releases
 
-The six `CE64_V5_FM66_*_20260910.hex` files are the latest user-requested fused
-release, replaced in place with the `20260910_peerclock1` UART clock fix.
-Version and filenames remain FM66 by request; check `FM66_SHA256SUMS.txt` to
-identify the replacement. The paired 30-second 20 kHz/64 MHz test passed.
-**Read [FM66 release notes](FM66_RELEASE_NOTES.md) before deployment:
-ADC startup zeros remain unresolved and the one-hour paired test is pending.**
-FM66 must not be treated as an error-free, fully validated production image.
-Each file contains Bootloader V5, the application manifest, the CE64
-application, and the resident V4-compatible USB service image.
+Latest firmware: **FM67 / Bootloader V5, 2026-09-14**.
 
-Select the image by hardware pinout (`HW1` or `HW2`) and compiled role
-(`Auto`, `Master`, or `Slave`). WILD Console accepts the fused HEX directly for
-BLE OTA, SD update staging, USB DFU, or full-flash programming.
+Download one fused HEX matching the logger's hardware pinout and intended role:
 
-Bootloader V5 restores automatic installation of a valid, different SD image,
-accepts both legacy `BOOTLOAD` and V3 staging manifests, and cold power-cycles
-the SD rail before probing. The application publishes a recoverable directory
-checkpoint every five minutes at a completed allocation-unit boundary.
+| Hardware | Automatic role | Forced Master | Forced Slave |
+|---|---|---|---|
+| HW1 | [Auto](CE64_V5_FM67_HW1_Auto_20260914.hex) | [Master](CE64_V5_FM67_HW1_Master_20260914.hex) | [Slave](CE64_V5_FM67_HW1_Slave_20260914.hex) |
+| HW2 | [Auto](CE64_V5_FM67_HW2_Auto_20260914.hex) | [Master](CE64_V5_FM67_HW2_Master_20260914.hex) | [Slave](CE64_V5_FM67_HW2_Slave_20260914.hex) |
 
-FM66 adds DMA-backed slow AUX telemetry during high-speed ADC and UART receive
-robustness. This replacement also retimes the peer UART after BLE-preserving
-clock changes, fixing the observed Master/Slave command-delivery failure.
-Its 120-second development test demonstrated changing AUX and
-clean recording stop, but saved ADC data had at least 38.4 ms of startup zeros.
-Battery freshness during high-speed ADC, ADC-off AUX, analog accuracy, and
-full chronology remain unvalidated. No new Console installer accompanies FM66;
-the existing WILD Console 3.4.2.169 package is unchanged.
+See [release notes and validation limits](FM67_RELEASE_NOTES.md) and
+[SHA256 checksums](FM67_SHA256SUMS.txt). All six builds passed the fused-image
+extraction/role and memory gates. The HW2-Master application differs from the
+tested September 13 candidate only in its FM version constants.
 
-The prior FM65 baseline restores deterministic completion margin for the 1.28 MHz Intan one-shot
-without changing the sampling cadence, SD writer, or recorder buffers. It also
-hardens the synchronized follower wake/role handoff, keeps advertisement work
-outside unsafe recording windows, and limits LMT70/VDD1 duty cycling to fs=0
-recording. The 64 MHz, 20 kHz ephys-only path and equal Master/Slave sector
-counts passed its release HIL gates. These results do not constitute an exact
-FM66 hardware pass. FM65's six images remain available in `legacy/`.
+The candidate passed separate 31-minute 20 kHz ephys-only and fs=0 recordings,
+periodic directory checkpoints, reconnect/preview/Stop, disconnected status
+advertisements and sampled readback. This does not certify every sample of a
+complete recording, paired endurance, camera quality or all physical updates.
 
-Earlier CE64 images are retained in [`legacy/`](legacy/), including FM65 for
-users needing the prior validated baseline or reproducing an older installation.
+FM67 preserves the 64 MHz 20 kHz ephys-only policy. Its peak class is 108.8 MHz
+(overclock), with the tested SD descriptor path and ordinary idle WFI restored.
+
+## Updating
+
+The same fused HEX is used for SD staging, BLE OTA, USB DFU or full SWD flash.
+A compatible WILD Console extracts the application for SD/BLE; those paths
+**do not replace the installed bootloader**. Installing/replacing Bootloader V5
+requires full-image programming by SWD or the supported full-flash USB option.
+An older installed loader retains its own update limitations.
+
+Bootloader V5 automatically installs a valid, different staged SD application.
+No intermediate `.bin` is required for current fused-HEX-aware Console workflows.
+Host extraction fixtures are not a guarantee of an interrupted-device recovery.
+
+## Downloader warning
+
+The installed/public Console 3.4.2.169 decoder has a known bank-B signed-carry
+defect. Validation used the corrected development decoder. This firmware-only
+publication does not update the installer or certify exports made by the old
+decoder. Keep original SD data until downloading with the corrected decoder.
+
+Older releases remain recoverable in [legacy](legacy/), including the archived
+[FM66 package and notes](legacy/FM66_20260910/). No recordings were erased or
+devices flashed as part of this publication.
