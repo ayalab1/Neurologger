@@ -14,6 +14,13 @@ from ..models import (
 from .gaps import AdaptiveChangePoint, detect_relative_offset_steps
 
 
+RETURNING_STEP_MIN_GLOBAL_INLIER_FRACTION = 0.95
+RETURNING_STEP_MAX_GLOBAL_RMS_SAMPLES = 1.0
+RETURNING_STEP_MAX_GLOBAL_RESIDUAL_SAMPLES = 6.0
+RETURNING_STEP_MAX_CONSTANT_DRIFT_SAMPLES = 0.5
+RETURNING_STEP_MAX_CONSTANT_RMS_INCREASE_SAMPLES = 0.1
+
+
 def anchors_from_accepted_observations(
     observations: list[SyncObservation],
     fs: float,
@@ -111,6 +118,8 @@ def fit_independent_device_segments(
     canonical_end_sample: int,
     source_sample_count: int,
     unresolved_ranges: tuple[tuple[int, int], ...] | list[tuple[int, int]] = (),
+    fixed_source_scale: float | None = None,
+    fixed_source_intercept_samples: float | None = None,
 ) -> tuple[DeviceSyncSegment, ...]:
     """Fit independently supported device mappings between change boundaries.
 
@@ -123,6 +132,14 @@ def fit_independent_device_segments(
         raise ValueError("invalid device or canonical segment bounds")
     if source_sample_count <= 0:
         raise ValueError("source_sample_count must be positive")
+    if (fixed_source_scale is None) != (fixed_source_intercept_samples is None):
+        raise ValueError("fixed mapping requires both source scale and intercept")
+    if fixed_source_scale is not None and (
+        not np.isfinite(fixed_source_scale)
+        or fixed_source_scale <= 0
+        or not np.isfinite(fixed_source_intercept_samples)
+    ):
+        raise ValueError("fixed mapping coefficients must be finite with positive scale")
     ordered_anchors = tuple(anchors)
     if any(not isinstance(anchor, DeviceSyncAnchor) for anchor in ordered_anchors):
         raise ValueError("anchors must be DeviceSyncAnchor instances")
@@ -159,7 +176,19 @@ def fit_independent_device_segments(
         )
         if len(local) < 2:
             continue
-        scale, intercept, residuals = _fit_segment_affine(local)
+        if fixed_source_scale is None:
+            scale, intercept, residuals = _fit_segment_affine(local)
+        else:
+            scale = float(fixed_source_scale)
+            intercept = float(fixed_source_intercept_samples)
+            residuals = np.asarray(
+                [
+                    anchor.source_sample
+                    - (scale * anchor.canonical_sample + intercept)
+                    for anchor in local
+                ],
+                dtype=np.float64,
+            )
         if abs(scale - 1.0) <= 1e-12:
             scale = 1.0
         if abs(intercept) <= 1e-9:
@@ -181,11 +210,12 @@ def fit_independent_device_segments(
         )
         if supported_end <= supported_start or len(local) < 2:
             continue
-        scale, intercept, residuals = _fit_segment_affine(local)
-        if abs(scale - 1.0) <= 1e-12:
-            scale = 1.0
-        if abs(intercept) <= 1e-9:
-            intercept = 0.0
+        if fixed_source_scale is None:
+            scale, intercept, residuals = _fit_segment_affine(local)
+            if abs(scale - 1.0) <= 1e-12:
+                scale = 1.0
+            if abs(intercept) <= 1e-9:
+                intercept = 0.0
         # Residual metadata must describe the exact coefficients that will be
         # serialized and validated.  Snapping a near-unity scale can otherwise
         # move a long-recording anchor by more than floating-point epsilon.
@@ -219,7 +249,11 @@ def fit_independent_device_segments(
                     "recording_end" if supported_end == canonical_end_sample else "segment_boundary"
                 ),
                 publishable=True,
-                evidence="independent affine fit from verified anchors",
+                evidence=(
+                    "fixed pair-level mapping retained across verified support"
+                    if fixed_source_scale is not None
+                    else "independent affine fit from verified anchors"
+                ),
             )
         if segments:
             previous_last = segments[-1].map_canonical_sample(
@@ -264,12 +298,131 @@ def _robust_inlier_mask(x: np.ndarray, y: np.ndarray, *, constant_offset: bool) 
     return keep, coefficients
 
 
+def _independent_observation_count(
+    observations: list[SyncObservation], minimum_spacing_seconds: float
+) -> int:
+    """Count time-separated evidence rather than overlapping windows twice."""
+
+    selected: list[SyncObservation] = []
+    for observation in sorted(observations, key=lambda item: item.center_time_sec):
+        if (
+            not selected
+            or observation.center_time_sec - selected[-1].center_time_sec
+            >= minimum_spacing_seconds - 1e-9
+        ):
+            selected.append(observation)
+    return len(selected)
+
+
+def select_supported_offset_steps(
+    observations: list[SyncObservation],
+    fs: float,
+    options: SyncOptions,
+) -> tuple[tuple[RelativeOffsetStep, ...], tuple[RelativeOffsetStep, ...], bool]:
+    """Reject weak, rapidly returning step pairs when one global fit is strong.
+
+    Two overlapping correlation windows do not provide two independent
+    confirmations of a temporary timing level.  This filter is deliberately
+    narrow: it considers only adjacent, medium-confidence, opposite steps that
+    nearly cancel within two correlation windows.  Permanent steps and returning
+    levels with independently spaced support remain untouched.
+
+    The final boolean requests a constant-offset model only when the no-step
+    affine drift is below half a sample over the observed span and the robust
+    constant fit is effectively equivalent.
+    """
+
+    detected = detect_relative_offset_steps(observations, fs, options)
+    if len(detected) < 2:
+        return detected, (), False
+
+    accepted = [item for item in observations if item.accepted]
+    if len(accepted) < 2:
+        return detected, (), False
+    x = np.asarray([item.center_time_sec for item in accepted], dtype=np.float64)
+    y = np.asarray([item.observed_offset_samples for item in accepted], dtype=np.float64)
+    affine_keep, affine_coefficients = _robust_inlier_mask(
+        x, y, constant_offset=False
+    )
+    affine_residuals = y - np.polyval(affine_coefficients, x)
+    affine_inliers = affine_residuals[affine_keep]
+    if not affine_inliers.size:
+        return detected, (), False
+    strong_global_fit = (
+        int(np.count_nonzero(affine_keep)) / max(len(observations), 1)
+        >= max(options.min_accepted_fraction, RETURNING_STEP_MIN_GLOBAL_INLIER_FRACTION)
+        and float(np.sqrt(np.mean(np.square(affine_inliers))))
+        <= min(options.max_model_rms_samples, RETURNING_STEP_MAX_GLOBAL_RMS_SAMPLES)
+        and float(np.max(np.abs(affine_inliers)))
+        <= min(
+            options.max_model_residual_samples,
+            RETURNING_STEP_MAX_GLOBAL_RESIDUAL_SAMPLES,
+        )
+    )
+    if not strong_global_fit:
+        return detected, (), False
+
+    suppressed_indices: set[int] = set()
+    for first_index, (first, second) in enumerate(zip(detected, detected[1:])):
+        if first.confidence == "high" or second.confidence == "high":
+            continue
+        if first.offset_step_samples * second.offset_step_samples >= 0:
+            continue
+        if second.time_sec - first.time_sec > 2.0 * options.window_seconds + 1e-9:
+            continue
+        if (
+            abs(first.offset_step_samples + second.offset_step_samples)
+            > options.gap_level_tolerance_samples
+        ):
+            continue
+        excursion = [
+            item
+            for item in accepted
+            if first.time_sec <= item.center_time_sec <= second.time_sec
+        ]
+        if (
+            _independent_observation_count(excursion, options.window_seconds)
+            < max(2, int(options.gap_persistence_observations))
+        ):
+            suppressed_indices.update((first_index, first_index + 1))
+
+    if not suppressed_indices:
+        return detected, (), False
+    retained = tuple(
+        step for index, step in enumerate(detected) if index not in suppressed_indices
+    )
+    suppressed = tuple(
+        step for index, step in enumerate(detected) if index in suppressed_indices
+    )
+
+    constant_keep, constant_coefficients = _robust_inlier_mask(
+        x, y, constant_offset=True
+    )
+    constant_residuals = y - np.polyval(constant_coefficients, x)
+    constant_inliers = constant_residuals[constant_keep]
+    affine_rms = float(np.sqrt(np.mean(np.square(affine_inliers))))
+    constant_rms = float(np.sqrt(np.mean(np.square(constant_inliers))))
+    total_affine_drift = abs(float(affine_coefficients[0])) * float(np.ptp(x))
+    force_constant = (
+        not retained
+        and total_affine_drift <= RETURNING_STEP_MAX_CONSTANT_DRIFT_SAMPLES
+        and constant_rms <= affine_rms + RETURNING_STEP_MAX_CONSTANT_RMS_INCREASE_SAMPLES
+        and float(np.max(np.abs(constant_inliers)))
+        <= min(
+            options.max_model_residual_samples,
+            RETURNING_STEP_MAX_GLOBAL_RESIDUAL_SAMPLES,
+        )
+    )
+    return retained, suppressed, force_constant
+
+
 def fit_affine_sync_model(
     observations: list[SyncObservation],
     fs: float,
     *,
     options: SyncOptions | None = None,
     offset_steps: tuple[RelativeOffsetStep, ...] | None = None,
+    force_constant_offset: bool = False,
 ) -> SyncModel:
     """Fit the master-to-slave offset model from accepted observations.
 
@@ -292,11 +445,13 @@ def fit_affine_sync_model(
     x = np.asarray([observation.center_time_sec for observation in accepted], dtype=np.float64)
     observed_y = np.asarray([observation.observed_offset_samples for observation in accepted], dtype=np.float64)
     if offset_steps is None:
-        offset_steps = (
-            detect_relative_offset_steps(observations, fs, options)
-            if options is not None
-            else ()
-        )
+        if options is None:
+            offset_steps = ()
+        else:
+            offset_steps, _, selected_constant = select_supported_offset_steps(
+                observations, fs, options
+            )
+            force_constant_offset = force_constant_offset or selected_constant
     step_values = np.asarray(
         [
             sum(step.offset_step_samples for step in offset_steps if step.time_sec <= time_sec)
@@ -311,7 +466,9 @@ def fit_affine_sync_model(
         if options is not None and observed_times
         else float("inf")
     )
-    constant_offset = options is not None and usable_duration < options.short_recording_seconds
+    constant_offset = bool(force_constant_offset) or (
+        options is not None and usable_duration < options.short_recording_seconds
+    )
     keep, coefficients = _robust_inlier_mask(x, y, constant_offset=constant_offset)
     all_residuals = y - np.polyval(coefficients, x)
     residuals = all_residuals[keep]

@@ -593,6 +593,7 @@ class SyncPairResult:
     validated_start_master_sample: int = 0
     terminal_crop_master_sample: int | None = None
     terminal_crop_reason: str = ""
+    retain_pair_model_mapping: bool = False
 
     @property
     def final_offset_samples(self) -> float:

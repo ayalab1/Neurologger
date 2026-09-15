@@ -17,6 +17,7 @@ from wild_preprocess.models import (
     map_verified_device_sample,
     validate_device_sync_segments,
 )
+from wild_preprocess.sync.infer import fit_independent_device_segments
 
 
 def _segment(**overrides: object) -> DeviceSyncSegment:
@@ -42,6 +43,37 @@ def _segment(**overrides: object) -> DeviceSyncSegment:
 
 
 class DeviceSyncSegmentTests(unittest.TestCase):
+    def test_fixed_pair_mapping_is_reused_across_excluded_interval(self) -> None:
+        anchors = (
+            DeviceSyncAnchor(10, 40.0, True, "high"),
+            DeviceSyncAnchor(40, 71.0, True, "high"),
+            DeviceSyncAnchor(70, 100.0, True, "high"),
+            DeviceSyncAnchor(90, 119.0, True, "high"),
+        )
+        segments = fit_independent_device_segments(
+            anchors,
+            (),
+            device_index=2,
+            canonical_start_sample=0,
+            canonical_end_sample=100,
+            source_sample_count=200,
+            unresolved_ranges=((50, 60),),
+            fixed_source_scale=1.0,
+            fixed_source_intercept_samples=30.0,
+        )
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(
+            [(item.canonical_start_sample, item.canonical_end_sample) for item in segments],
+            [(0, 50), (60, 100)],
+        )
+        self.assertTrue(all(item.source_scale == 1.0 for item in segments))
+        self.assertTrue(
+            all(item.source_intercept_samples == 30.0 for item in segments)
+        )
+        self.assertTrue(
+            all("fixed pair-level mapping" in item.evidence for item in segments)
+        )
+
     def test_verified_segment_maps_only_its_half_open_supported_range(self) -> None:
         segment = _segment()
 

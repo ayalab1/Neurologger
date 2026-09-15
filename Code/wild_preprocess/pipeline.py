@@ -68,6 +68,7 @@ from .sync.infer import (
     anchors_from_accepted_observations,
     fit_affine_sync_model,
     fit_independent_device_segments,
+    select_supported_offset_steps,
 )
 from .sync.merge import (
     EPHYS_SINC_HALF_WIDTH,
@@ -583,6 +584,16 @@ def _pair_device_segments(
         canonical_end_sample=end,
         source_sample_count=recording.n_samples,
         unresolved_ranges=clipped_ranges,
+        fixed_source_scale=(
+            pair.model.source_scale(fs)
+            if pair.retain_pair_model_mapping and not pair.model.offset_steps
+            else None
+        ),
+        fixed_source_intercept_samples=(
+            pair.model.intercept_samples
+            if pair.retain_pair_model_mapping and not pair.model.offset_steps
+            else None
+        ),
     )
 
 
@@ -1044,7 +1055,33 @@ def run_multidevice_sync(
         for refined_count, slave_index in enumerate(slave_indices, start=1):
             slave = recordings[slave_index]
             observed = observed_by_slave[slave_index]
-            model = fit_affine_sync_model(observed.observations, master.fs, options=options)
+            (
+                selected_offset_steps,
+                suppressed_offset_steps,
+                force_constant_offset,
+            ) = select_supported_offset_steps(
+                observed.observations,
+                master.fs,
+                options,
+            )
+            model = fit_affine_sync_model(
+                observed.observations,
+                master.fs,
+                options=options,
+                offset_steps=selected_offset_steps,
+                force_constant_offset=force_constant_offset,
+            )
+            returning_step_message = ""
+            if suppressed_offset_steps:
+                returning_step_message = (
+                    f"rejected {len(suppressed_offset_steps)} weak returning offset-step "
+                    "candidate(s) lacking independently spaced support; retained "
+                    + (
+                        f"constant offset {model.intercept_samples:.3f} samples"
+                        if model.is_constant_offset
+                        else "robust no-step affine model"
+                    )
+                )
             if model.offset_steps:
                 master_feature = feature_memmap(feature_paths[master_index], master.n_samples)
                 slave_feature = feature_memmap(feature_paths[slave_index], slave.n_samples)
@@ -1195,8 +1232,17 @@ def run_multidevice_sync(
                     options=options,
                     offset_steps=validated_steps,
                 )
+            adaptive_observations = (
+                [
+                    observation
+                    for observation in validation_observations
+                    if not observation.accepted or observation.model_inlier
+                ]
+                if suppressed_offset_steps
+                else validation_observations
+            )
             adaptive_points = detect_adaptive_change_points(
-                validation_observations,
+                adaptive_observations,
                 master.fs,
                 options,
             )
@@ -1225,7 +1271,13 @@ def run_multidevice_sync(
                 options,
             )
             operational_warnings = [
-                item for item in (isolated_alias_message, terminal_crop_reason) if item
+                item
+                for item in (
+                    returning_step_message,
+                    isolated_alias_message,
+                    terminal_crop_reason,
+                )
+                if item
             ]
             if operational_warnings and status != "FAIL":
                 status = "WARN"
@@ -1278,6 +1330,9 @@ def run_multidevice_sync(
                 validated_start_master_sample=validated_start,
                 terminal_crop_master_sample=terminal_crop_master_sample,
                 terminal_crop_reason=terminal_crop_reason,
+                retain_pair_model_mapping=bool(
+                    suppressed_offset_steps and force_constant_offset
+                ),
             )
             with performance.measure("pair_figure_generation"):
                 save_pair_figure(pair, observed, figure_path)

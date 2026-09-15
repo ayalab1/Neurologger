@@ -16,7 +16,10 @@ if str(CODE_ROOT) not in sys.path:
 
 from wild_preprocess.binary_io import recordings_from_folders
 from wild_preprocess.models import Recording, RelativeOffsetStep, SyncObservation, SyncOptions
-from wild_preprocess.sync.infer import fit_affine_sync_model
+from wild_preprocess.sync.infer import (
+    fit_affine_sync_model,
+    select_supported_offset_steps,
+)
 from wild_preprocess.sync.observe import LagEstimate, _tracking_rejection_reasons, estimate_lag, observe_pair
 from wild_preprocess.sync.validate import validate_pair
 
@@ -257,6 +260,53 @@ class SyncQcRegressionTest(unittest.TestCase):
         self.assertEqual(status, "OK")
         self.assertNotIn("persistent offset level shift", message)
         self.assertNotIn("detrended offset step", message)
+
+    def test_brief_medium_confidence_returning_steps_use_constant_global_model(self) -> None:
+        options = SyncOptions()
+        observations = _observations([30.0] * 50 + [-15_174.0] * 2 + [30.0] * 50)
+        for observation in observations:
+            observation.peak_correlation = 0.06
+        retained, suppressed, force_constant = select_supported_offset_steps(
+            observations, 20_000, options
+        )
+        model = fit_affine_sync_model(observations, fs=20_000, options=options)
+        self.assertFalse(retained)
+        self.assertEqual(len(suppressed), 2)
+        self.assertTrue(force_constant)
+        self.assertTrue(model.is_constant_offset)
+        self.assertEqual(model.offset_steps, ())
+        self.assertAlmostEqual(model.intercept_samples, 30.0)
+        self.assertEqual(sum(not item.model_inlier for item in observations), 2)
+
+    def test_permanent_step_is_not_suppressed(self) -> None:
+        options = SyncOptions()
+        observations = _observations([30.0] * 10 + [130.0] * 12)
+        retained, suppressed, force_constant = select_supported_offset_steps(
+            observations, 20_000, options
+        )
+        self.assertEqual(len(retained), 1)
+        self.assertFalse(suppressed)
+        self.assertFalse(force_constant)
+
+    def test_returning_steps_with_independent_support_are_not_suppressed(self) -> None:
+        options = SyncOptions()
+        observations = _observations([30.0] * 10 + [130.0] * 5 + [30.0] * 12)
+        for observation in observations:
+            observation.peak_correlation = 0.06
+        retained, suppressed, force_constant = select_supported_offset_steps(
+            observations, 20_000, options
+        )
+        self.assertEqual(len(retained), 2)
+        self.assertFalse(suppressed)
+        self.assertFalse(force_constant)
+
+    def test_unstable_sides_do_not_create_persistent_shift_failure(self) -> None:
+        options = SyncOptions()
+        observations = _observations([30.0] * 10 + [35.0, 34.0, 28.0] + [30.0] * 10)
+        model = fit_affine_sync_model(observations, fs=20_000, options=options)
+        status, message = validate_pair(_initial(), observations, model, options)
+        self.assertEqual(status, "OK")
+        self.assertNotIn("persistent offset level shift", message)
 
     def test_wt4_day11_endpoint_model_outlier_does_not_fail_pair(self) -> None:
         options = SyncOptions()

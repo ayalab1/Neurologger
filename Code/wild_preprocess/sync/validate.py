@@ -69,6 +69,11 @@ def _persistent_offset_level_shift(
     if persistence == 1:
         return float(np.max(np.abs(np.diff(residuals))))
 
+    residual_center = float(np.median(residuals))
+    residual_sigma = float(
+        1.4826 * np.median(np.abs(residuals - residual_center))
+    )
+    stability_tolerance = max(1.0, 4.0 * residual_sigma)
     max_shift = 0.0
     for split in range(persistence, residuals.size - persistence + 1):
         window = slice(split - persistence, split + persistence)
@@ -87,6 +92,17 @@ def _persistent_offset_level_shift(
             )
         )
         coefficients, *_ = np.linalg.lstsq(design, residuals[window], rcond=None)
+        local_errors = residuals[window] - design @ coefficients
+        # A level transition requires two internally stable sides.  Without
+        # this gate, a few ordinary lag-estimator fluctuations can be amplified
+        # by the shared-slope regression into a false persistent step.
+        if (
+            float(np.max(np.abs(local_errors[:persistence])))
+            > stability_tolerance + 1e-12
+            or float(np.max(np.abs(local_errors[persistence:])))
+            > stability_tolerance + 1e-12
+        ):
+            continue
         max_shift = max(max_shift, abs(float(coefficients[2])))
     return max_shift
 
