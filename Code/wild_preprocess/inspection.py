@@ -546,13 +546,13 @@ def write_session_inspection_png(
         plotted[~finite] = np.nan
         return plotted
 
-    figure, (residual_axis, validity_axis, alignment_axis, pc_axis) = plt.subplots(
-        4,
+    figure, (residual_axis, mapping_axis, validity_axis, alignment_axis, pc_axis) = plt.subplots(
+        5,
         1,
-        figsize=(17, 11.5),
+        figsize=(17, 14.0),
         sharex=True,
         constrained_layout=False,
-        gridspec_kw={"height_ratios": [2.2, 1.55, 1.25, 1.8]},
+        gridspec_kw={"height_ratios": [2.0, 1.8, 1.45, 1.2, 1.65]},
     )
 
     residual_values: list[float] = []
@@ -566,33 +566,31 @@ def write_session_inspection_png(
         if np.any(missing):
             residual[missing] = observed[missing] - _model_offset(pair, times[missing])
         accepted = np.asarray([bool(_value(item, "accepted", False)) for item in observations], dtype=bool)
+        model_inlier = np.asarray(
+            [bool(_value(item, "model_inlier", False)) for item in observations],
+            dtype=bool,
+        )
         usable = np.isfinite(times) & np.isfinite(residual)
         pair_label = f"M-S{color_index + 1}"
-        if np.any(usable & accepted):
+        fitted_observations = usable & accepted & model_inlier
+        if np.any(fitted_observations):
             residual_axis.scatter(
-                display_times(times[usable & accepted]),
-                residual[usable & accepted],
+                display_times(times[fitted_observations]),
+                residual[fitted_observations],
                 s=7,
                 alpha=0.48,
                 color=f"C{color_index}",
                 label=f"{pair_label} fit",
             )
-        if np.any(usable & ~accepted):
-            residual_axis.scatter(
-                display_times(times[usable & ~accepted]),
-                residual[usable & ~accepted],
-                s=22,
-                marker="x",
-                linewidths=0.9,
-                color=f"C{color_index}",
-                label=f"{pair_label} rejected",
-            )
-        residual_values.extend(float(value) for value in residual[usable])
+        residual_values.extend(float(value) for value in residual[fitted_observations])
         model = _value(pair, "model", None)
+        omitted_outliers = int(np.count_nonzero(usable & accepted & ~model_inlier))
+        rejected_searches = int(np.count_nonzero(~accepted))
         pair_summaries.append(
             f"{pair_label}: offset {float(_value(model, 'intercept_samples', 0.0)):.2f}, "
             f"drift {float(_value(model, 'drift_ppm', 0.0)):.3g} ppm, "
-            f"RMS {float(_value(model, 'residual_rms_samples', float('nan'))):.3g} samples"
+            f"RMS {float(_value(model, 'residual_rms_samples', float('nan'))):.3g} samples; "
+            f"omitted {omitted_outliers} outlier(s), {rejected_searches} rejected search(es)"
         )
     boundary_labels_seen: set[str] = set()
     for time_sec, residual, event_status, _label in sorted_joins:
@@ -626,7 +624,7 @@ def write_session_inspection_png(
             pair_summaries.append(f"{clipped_count} residual point(s) outside y-range")
         residual_axis.set_ylim(-half_range, half_range)
     residual_axis.set_ylabel("sync residual (samples)")
-    residual_title = "A. Master-slave residuals after correction"
+    residual_title = "A. Model-inlier residuals (outliers and rejected searches omitted)"
     if residual_tolerance_samples is not None:
         residual_title += (
             f" | model limit ±{abs(float(residual_tolerance_samples)):g} samples"
@@ -645,6 +643,126 @@ def write_session_inspection_png(
         )
     elif not sorted_joins:
         residual_axis.text(0.5, 0.5, "Sync observations unavailable", ha="center", va="center", transform=residual_axis.transAxes)
+
+    segment_values: object = segment_summary
+    if isinstance(segment_values, Mapping):
+        segment_values = segment_values.get(
+            "device_sync_segments", segment_values.get("segments", ())
+        )
+    final_segments = (
+        list(segment_values)
+        if isinstance(segment_values, Sequence)
+        and not isinstance(segment_values, (str, bytes))
+        else []
+    )
+    mapping_values: list[float] = []
+    for color_index, pair in enumerate(sorted_pairs):
+        pair_label = f"M-S{color_index + 1}"
+        observations = _pair_observations(pair)
+        times = np.asarray(
+            [_value(item, "center_time_sec", np.nan) for item in observations],
+            dtype=float,
+        )
+        observed = np.asarray(
+            [_value(item, "observed_offset_samples", np.nan) for item in observations],
+            dtype=float,
+        )
+        accepted = np.asarray(
+            [bool(_value(item, "accepted", False)) for item in observations],
+            dtype=bool,
+        )
+        model_inlier = np.asarray(
+            [bool(_value(item, "model_inlier", False)) for item in observations],
+            dtype=bool,
+        )
+        inliers = np.isfinite(times) & np.isfinite(observed) & accepted & model_inlier
+        if np.any(inliers):
+            mapping_axis.scatter(
+                display_times(times[inliers]),
+                observed[inliers],
+                s=6,
+                alpha=0.28,
+                color=f"C{color_index}",
+                label=f"{pair_label} model inliers",
+            )
+            mapping_values.extend(float(value) for value in observed[inliers])
+        model = _value(pair, "model", None)
+        finite_times = times[np.isfinite(times)]
+        if finite_times.size and model is not None:
+            reference_times = np.linspace(
+                float(np.min(finite_times)), float(np.max(finite_times)), 300
+            )
+            reference_offsets = _model_offset(pair, reference_times)
+            mapping_axis.plot(
+                display_times(reference_times),
+                reference_offsets,
+                color=f"C{color_index}",
+                linestyle="--",
+                linewidth=0.9,
+                alpha=0.7,
+                label=f"{pair_label} pair model",
+            )
+            mapping_values.extend(
+                float(value) for value in reference_offsets[np.isfinite(reference_offsets)]
+            )
+        slave_index = int(_value(pair, "slave_index", 0))
+        applied_count = 0
+        for segment in final_segments:
+            if int(_value(segment, "device_index", -1)) != slave_index:
+                continue
+            start = int(_value(segment, "canonical_start_sample", 0))
+            end = int(_value(segment, "canonical_end_sample", 0))
+            if end <= start:
+                continue
+            scale = float(_value(segment, "source_scale", 1.0))
+            intercept = float(
+                _value(segment, "source_intercept_samples", 0.0)
+            )
+            segment_samples = np.asarray([start, end - 1], dtype=np.float64)
+            segment_offsets = (scale - 1.0) * segment_samples + intercept
+            mapping_axis.plot(
+                (segment_samples - canonical_start_master_sample) / sample_rate_hz,
+                segment_offsets,
+                color=f"C{color_index}",
+                linewidth=2.0,
+                label=(
+                    f"{pair_label} final applied mapping"
+                    if applied_count == 0
+                    else "_nolegend_"
+                ),
+            )
+            mapping_values.extend(float(value) for value in segment_offsets)
+            applied_count += 1
+    finite_mapping = np.asarray(mapping_values, dtype=float)
+    finite_mapping = finite_mapping[np.isfinite(finite_mapping)]
+    if finite_mapping.size:
+        lower, upper = np.percentile(finite_mapping, [0.5, 99.5])
+        center = 0.5 * (float(lower) + float(upper))
+        half_range = max(0.75, 0.65 * float(upper - lower))
+        mapping_axis.set_ylim(center - half_range, center + half_range)
+        mapping_axis.ticklabel_format(axis="y", style="plain", useOffset=False)
+    else:
+        mapping_axis.text(
+            0.5,
+            0.5,
+            "Final applied mapping unavailable",
+            ha="center",
+            va="center",
+            transform=mapping_axis.transAxes,
+        )
+    mapping_axis.set_ylabel("offset (samples)")
+    mapping_axis.set_title(
+        "B. Final mappings supplied to the renderer (solid); pair models are dashed"
+    )
+    mapping_handles, mapping_labels = mapping_axis.get_legend_handles_labels()
+    if mapping_handles:
+        mapping_axis.legend(
+            mapping_handles,
+            mapping_labels,
+            loc="upper left",
+            bbox_to_anchor=(1.005, 1.0),
+            fontsize=8,
+        )
 
     device_valid_fractions = np.full(devices, np.nan)
     common_valid_fraction = float("nan")
@@ -740,7 +858,7 @@ def write_session_inspection_png(
         )
     validity_axis.set_ylabel("data validity")
     validity_axis.set_title(
-        "B. Data validity only (short invalid intervals widened)"
+        "C. Data validity only (short invalid intervals widened)"
     )
 
     common_alignment_fraction = float("nan")
@@ -848,7 +966,7 @@ def write_session_inspection_png(
             fontsize=8,
         )
     alignment_axis.set_ylabel("sync quality")
-    alignment_title = "C. Master-referenced synchronization"
+    alignment_title = "D. Master-referenced synchronization"
     if alignment_tolerance_samples is not None:
         tolerance_ms = (
             1000.0 * abs(float(alignment_tolerance_samples)) / sample_rate_hz
@@ -909,9 +1027,9 @@ def write_session_inspection_png(
     pc_axis.set_ylabel("PC residual (ms)")
     pc_axis.set_xlabel("canonical time from recording start (s)")
     pc_axis.set_title(
-        "D. PC-time residuals and camera coverage"
+        "E. PC-time residuals and camera coverage"
         if sorted_camera
-        else "D. PC-time residuals"
+        else "E. PC-time residuals"
     )
     pc_legend_title: str | None = None
     if isinstance(pc_time, PcTimeModel):
@@ -941,7 +1059,7 @@ def write_session_inspection_png(
             title_fontsize=7.5,
         )
 
-    for axis in (residual_axis, validity_axis, alignment_axis, pc_axis):
+    for axis in (residual_axis, mapping_axis, validity_axis, alignment_axis, pc_axis):
         axis.set_xlim(0.0, duration_sec)
         axis.grid(axis="x", linewidth=0.35, alpha=0.35)
     maximum_residual = float(np.max(np.abs(finite_residual))) if finite_residual.size else float("nan")
@@ -966,7 +1084,7 @@ def write_session_inspection_png(
         right=0.76,
         top=0.94,
         bottom=0.06,
-        hspace=0.38,
+        hspace=0.42,
     )
     figure.suptitle(summary, fontsize=12, y=0.985)
     output = Path(path)

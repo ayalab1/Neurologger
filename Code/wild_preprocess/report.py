@@ -32,7 +32,7 @@ def save_pair_figure(
     filename: Path,
 ) -> None:
     filename.parent.mkdir(parents=True, exist_ok=True)
-    figure, axes = plt.subplots(3, 1, figsize=(13, 9), constrained_layout=True)
+    figure, axes = plt.subplots(4, 1, figsize=(13, 11), constrained_layout=True)
     decimation = max(1, observed.initial_master.size // 20000)
     x = np.arange(0, observed.initial_master.size, decimation)
     axes[0].plot(x, observed.initial_master[::decimation], linewidth=0.6, label="master")
@@ -52,11 +52,19 @@ def save_pair_figure(
     times = np.asarray([item.center_time_sec for item in pair.observations], dtype=float)
     offsets = np.asarray([item.observed_offset_samples for item in pair.observations], dtype=float)
     accepted = np.asarray([item.accepted for item in pair.observations], dtype=bool)
+    model_inlier = np.asarray(
+        [item.model_inlier for item in pair.observations], dtype=bool
+    )
+    accepted_inlier = accepted & model_inlier
+    accepted_outlier = accepted & ~model_inlier
     margins = np.asarray([item.peak_margin_fraction for item in pair.observations], dtype=float)
-    if accepted.any():
-        axes[2].scatter(times[accepted], offsets[accepted], s=9, label="accepted observations")
-    if (~accepted).any():
-        axes[2].scatter(times[~accepted], offsets[~accepted], s=18, marker="x", color="tab:red", label="rejected")
+    if accepted_inlier.any():
+        axes[2].scatter(
+            times[accepted_inlier],
+            offsets[accepted_inlier],
+            s=9,
+            label="accepted model inliers",
+        )
     if times.size:
         fitted = np.asarray([pair.model.offset_at_seconds(time_sec) for time_sec in times], dtype=float)
         axes[2].plot(times, fitted, color="black", linewidth=1.5, label=f"fit {pair.model.drift_ppm:.3f} ppm")
@@ -68,19 +76,62 @@ def save_pair_figure(
                 alpha=0.7,
                 label="offset step" if event_index == 0 else None,
             )
-        finite_offsets = offsets[np.isfinite(offsets)]
-        if finite_offsets.size and float(np.ptp(finite_offsets)) < 1.0:
-            center = float(np.median(finite_offsets))
-            half_range = max(0.5, float(np.max(np.abs(finite_offsets - center))) + 0.1)
+        detailed = np.concatenate(
+            (
+                offsets[accepted_inlier & np.isfinite(offsets)],
+                fitted[np.isfinite(fitted)],
+            )
+        )
+        if detailed.size:
+            lower, upper = np.percentile(detailed, [0.5, 99.5])
+            center = 0.5 * (float(lower) + float(upper))
+            half_range = max(0.75, 0.65 * float(upper - lower))
             axes[2].set_ylim(center - half_range, center + half_range)
             axes[2].ticklabel_format(axis="y", style="plain", useOffset=False)
-    axes[2].set_title(f"Gap-aware offset model ({pair.status})")
+    omitted_text = (
+        f"; omitted {int(np.count_nonzero(accepted_outlier))} model outlier(s)"
+        if np.any(accepted_outlier)
+        else ""
+    )
+    axes[2].set_title(f"Robust offset model detail ({pair.status}){omitted_text}")
     axes[2].set_xlabel("master time sec")
     axes[2].set_ylabel("slave offset samples")
     margin_axis = axes[2].twinx()
     margin_axis.plot(times, margins, color="tab:orange", linewidth=0.5, alpha=0.5)
     margin_axis.set_ylabel("primary/secondary margin")
     axes[2].legend(loc="best")
+
+    if accepted_inlier.any():
+        axes[3].scatter(
+            times[accepted_inlier],
+            offsets[accepted_inlier],
+            s=8,
+            alpha=0.45,
+            label="accepted model inliers",
+        )
+    if accepted_outlier.any():
+        axes[3].scatter(
+            times[accepted_outlier],
+            offsets[accepted_outlier],
+            s=28,
+            marker="x",
+            color="tab:red",
+            label="accepted model outliers",
+        )
+    if times.size:
+        axes[3].plot(times, fitted, color="black", linewidth=1.2, label="robust fit")
+    axes[3].set_title(
+        "Accepted observations, full offset range"
+        + (
+            f"; {int(np.count_nonzero(~accepted))} rejected search(es) omitted because their stored offsets may be carried predictions"
+            if np.any(~accepted)
+            else ""
+        )
+    )
+    axes[3].set_xlabel("master time sec")
+    axes[3].set_ylabel("slave offset samples")
+    axes[3].ticklabel_format(axis="y", style="plain", useOffset=False)
+    axes[3].legend(loc="best")
     figure.suptitle(
         f"master {Path(pair.master_folder).parent.name} vs slave {Path(pair.slave_folder).parent.name}",
         fontsize=12,

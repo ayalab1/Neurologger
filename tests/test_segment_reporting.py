@@ -30,7 +30,15 @@ from wild_preprocess.inspection import (
     _segment_report_lines,
     write_session_inspection_png,
 )
-from wild_preprocess.models import DeviceSyncAnchor, DeviceSyncSegment
+from wild_preprocess.models import (
+    DeviceSyncAnchor,
+    DeviceSyncSegment,
+    SyncModel,
+    SyncObservation,
+    SyncPairResult,
+)
+from wild_preprocess.report import save_pair_figure
+from wild_preprocess.sync.observe import LagEstimate, PairObservations
 
 
 def _segment(device_index: int, start: int, end: int) -> DeviceSyncSegment:
@@ -55,6 +63,78 @@ def _segment(device_index: int, start: int, end: int) -> DeviceSyncSegment:
 
 
 class SegmentReportingTest(unittest.TestCase):
+    def test_pair_figure_separates_model_outliers_from_detailed_fit(self) -> None:
+        observations = [
+            SyncObservation(
+                center_time_sec=float(index),
+                predicted_offset_samples=30.0,
+                observed_offset_samples=30.0 + residual,
+                residual_lag_samples=residual,
+                peak_correlation=0.8,
+                peak_to_background=5.0,
+                peak_margin_fraction=0.5,
+                secondary_lag_samples=None,
+                accepted=True,
+                model_inlier=True,
+                model_residual_samples=residual,
+            )
+            for index, residual in enumerate((0.0, 0.5, -0.5, 0.0), start=1)
+        ]
+        observations.append(
+            SyncObservation(
+                2.5,
+                30.0,
+                5_000.0,
+                4_970.0,
+                0.1,
+                2.0,
+                0.2,
+                None,
+                True,
+                model_inlier=False,
+                model_residual_samples=4_970.0,
+            )
+        )
+        model = SyncModel(30.0, 0.0, 0.0, 0.35, 0.5, 4, 5)
+        pair = SyncPairResult(
+            1, 2, "master", "slave", 30.0, 5.0, 0.5, model, observations, "WARN"
+        )
+        initial = LagEstimate(
+            30,
+            0.8,
+            5.0,
+            0.5,
+            None,
+            np.arange(-2, 3),
+            np.asarray((0.0, 0.2, 0.8, 0.2, 0.0)),
+        )
+        observed = PairObservations(
+            initial,
+            observations,
+            np.arange(100, dtype=float),
+            np.arange(100, dtype=float),
+        )
+        figures = []
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch("wild_preprocess.report.plt.close", side_effect=figures.append):
+                save_pair_figure(pair, observed, Path(temporary) / "pair.png")
+        self.assertEqual(len(figures), 1)
+        figure = figures[0]
+        try:
+            detail = next(
+                axis for axis in figure.axes if axis.get_title().startswith("Robust offset model detail")
+            )
+            full = next(
+                axis for axis in figure.axes if axis.get_title().startswith("Accepted observations, full offset range")
+            )
+            self.assertLess(detail.get_ylim()[1], 100.0)
+            self.assertGreater(full.get_ylim()[1], 1_000.0)
+            self.assertIn("omitted 1 model outlier", detail.get_title())
+        finally:
+            import matplotlib.pyplot as plt
+
+            plt.close(figure)
+
     def test_gui_progress_is_stage_local_and_numbered(self) -> None:
         self.assertEqual(len(PIPELINE_PROGRESS_STAGES), 12)
         self.assertEqual(
@@ -263,7 +343,7 @@ class SegmentReportingTest(unittest.TestCase):
             all_text = [text.get_text() for axis in figure.axes for text in axis.texts]
             all_text.extend(text.get_text() for text in figure.texts)
             self.assertNotIn(long_label, all_text)
-            validity_legend = figure.axes[1].get_legend()
+            validity_legend = figure.axes[2].get_legend()
             self.assertIsNotNone(validity_legend)
             legend_title = validity_legend.get_title().get_text()
             self.assertIn(
@@ -307,13 +387,13 @@ class SegmentReportingTest(unittest.TestCase):
         self.assertEqual(len(figures), 1)
         figure = figures[0]
         try:
-            validity_legend = figure.axes[1].get_legend()
+            validity_legend = figure.axes[2].get_legend()
             self.assertIsNotNone(validity_legend)
             legend_labels = [text.get_text() for text in validity_legend.get_texts()]
             self.assertIn("unverified mapping", legend_labels)
             self.assertIn("missing", legend_labels)
             self.assertNotEqual(_UNVERIFIED_MAPPING_COLOR, _REASON_COLORS["missing"])
-            pc_text = [text.get_text() for text in figure.axes[3].texts]
+            pc_text = [text.get_text() for text in figure.axes[4].texts]
             self.assertIn("PC-time unavailable: no packed clock updates", pc_text)
         finally:
             import matplotlib.pyplot as plt

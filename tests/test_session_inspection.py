@@ -110,8 +110,8 @@ class SessionInspectionTest(unittest.TestCase):
         self.assertEqual(len(figures), 1)
         figure = figures[0]
         try:
-            self.assertEqual(len(figure.axes), 4)
-            alignment_axis = figure.axes[2]
+            self.assertEqual(len(figure.axes), 5)
+            alignment_axis = figure.axes[3]
             self.assertIn("limit ±1 ms", alignment_axis.get_title())
             row_labels = [item.get_text() for item in alignment_axis.get_yticklabels()]
             self.assertTrue(any(label.startswith("M-S1 aligned") for label in row_labels))
@@ -125,6 +125,46 @@ class SessionInspectionTest(unittest.TestCase):
             )
             self.assertIn("common valid 90.000%", figure._suptitle.get_text())
             self.assertIn("common sync-safe 50.000%", figure._suptitle.get_text())
+        finally:
+            import matplotlib.pyplot as plt
+
+            plt.close(figure)
+
+    def test_final_applied_mapping_panel_uses_serialized_segment_coefficients(self) -> None:
+        figures = []
+        validity = np.ones((100, 2), dtype=np.uint8)
+        segment = {
+            "device_index": 1,
+            "canonical_start_sample": 0,
+            "canonical_end_sample": 100,
+            "source_scale": 1.0,
+            "source_intercept_samples": 3.0,
+            "publishable": True,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch(
+                "wild_preprocess.inspection.plt.close", side_effect=figures.append
+            ):
+                write_session_inspection_png(
+                    Path(temporary) / "inspection.png",
+                    sample_rate_hz=100.0,
+                    pairs=[_pair()],
+                    valid_samples=validity,
+                    device_labels=["master", "slave 1"],
+                    segment_summary=[segment],
+                )
+        self.assertEqual(len(figures), 1)
+        figure = figures[0]
+        try:
+            mapping_axis = figure.axes[1]
+            self.assertIn("Final mappings supplied", mapping_axis.get_title())
+            final_lines = [
+                line
+                for line in mapping_axis.lines
+                if "final applied mapping" in line.get_label()
+            ]
+            self.assertEqual(len(final_lines), 1)
+            np.testing.assert_allclose(final_lines[0].get_ydata(), [3.0, 3.0])
         finally:
             import matplotlib.pyplot as plt
 
