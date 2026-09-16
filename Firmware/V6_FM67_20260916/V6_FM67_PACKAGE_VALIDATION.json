@@ -1,0 +1,71 @@
+{
+  "status": "PASS",
+  "bootloader_version": 6,
+  "firmware_version": 67,
+  "core_sha256": "f33b38c6156798177927d0ad7c08e03b373ec3fc61806e9bfde73f9df224c37f",
+  "service_sha256": "046125dca56597c873ca02473450f77a2163ef36e1d85fd33ee229995fa7e728",
+  "service_generation": 2026091611,
+  "variants": [
+    {
+      "name": "CE64_V6_FM67_HW1_Auto_20260916.hex",
+      "sha256": "db27375b745b385c90ce918bc657b49cec1cc5d6450d563cccff947541eb57d9",
+      "source": "CE64_V5_FM67_HW1_Auto_20260914.hex",
+      "source_sha256": "0ab5ca39ec3ce3151c80b9cd27eab6bee42c1420fcd104d83837940ba4836e13",
+      "application_sha256": "8c0814b0a8bad7034d5a684e60068a181e5a08fd79ea9b085c3398dd943d65ce",
+      "application_bytes": 273568,
+      "flags": "0x64000100",
+      "application_and_manifest_unchanged": true
+    },
+    {
+      "name": "CE64_V6_FM67_HW1_Master_20260916.hex",
+      "sha256": "36041fe6980ca4a356ce9c4b3f9ebfdfdcd3416d19626b5700979360bc92e75a",
+      "source": "CE64_V5_FM67_HW1_Master_20260914.hex",
+      "source_sha256": "84a2b81cb5f65e9ccf8c3c5f91c8bb854fdcddeb9e24989e84f79595beae76d7",
+      "application_sha256": "1694b4b4c06a25ce4c3b4d739c5bbde0c50ae04ecd43afdc4dee47718ee502d7",
+      "application_bytes": 273440,
+      "flags": "0x64000110",
+      "application_and_manifest_unchanged": true
+    },
+    {
+      "name": "CE64_V6_FM67_HW1_Slave_20260916.hex",
+      "sha256": "b886568fae9b7e0420dd4f98dc56986d6cfb35336173eec8d2f97b7c21c1908b",
+      "source": "CE64_V5_FM67_HW1_Slave_20260914.hex",
+      "source_sha256": "0f4179e8e37fd23166bac6a76064242050936f58d7137a3a0bf475fc742e5b48",
+      "application_sha256": "d79973cab88c1b80c57becdfcc9324cffffd64e548a225f2415d3277a052098f",
+      "application_bytes": 273440,
+      "flags": "0x64000120",
+      "application_and_manifest_unchanged": true
+    },
+    {
+      "name": "CE64_V6_FM67_HW2_Auto_20260916.hex",
+      "sha256": "dcb3b7a767d36c30caf00dd6f59b02211285f9af0efd6125dca86336c525fd9c",
+      "source": "CE64_V5_FM67_HW2_Auto_20260914.hex",
+      "source_sha256": "eec24527fa658cc1908233c75b4ffb36dc1355b629d725057fe21df2c9c8d21f",
+      "application_sha256": "6576eeac29fbea73461b02c062e32ec16313584202aab2e69a77fadf23c9c203",
+      "application_bytes": 273472,
+      "flags": "0x64000200",
+      "application_and_manifest_unchanged": true
+    },
+    {
+      "name": "CE64_V6_FM67_HW2_Master_20260916.hex",
+      "sha256": "78e4060520fbcd7d58095e23f7537c07fb5d4d4e9d0710dcfc63707db2436b96",
+      "source": "CE64_V5_FM67_HW2_Master_20260914.hex",
+      "source_sha256": "acad128d1bc8145d4754d1caf812950b68be235b3fdab16791db321676a2c931",
+      "application_sha256": "d2f5002f7bc990b65449b1453d116a95e2d1af8d0f52e53fb30e7b1a12f8a2aa",
+      "application_bytes": 273344,
+      "flags": "0x64000210",
+      "application_and_manifest_unchanged": true
+    },
+    {
+      "name": "CE64_V6_FM67_HW2_Slave_20260916.hex",
+      "sha256": "512b16cce9ec8e4da0123613df343191f4527e9e27c825d864fd9cae7fa42016",
+      "source": "CE64_V5_FM67_HW2_Slave_20260914.hex",
+      "source_sha256": "514d1056916ba84ee5636b17aeb15d33cf055033941a0b43669f2c3a826dd4f4",
+      "application_sha256": "68c60b8c66298aeb9f68aa074733f6442ca14b69b3561f395bfc367f3ce966ec",
+      "application_bytes": 273344,
+      "flags": "0x64000220",
+      "application_and_manifest_unchanged": true
+    }
+  ],
+  "physical_usb_validation": "UNVALIDATED; user will test"
+}

@@ -1,6 +1,12 @@
 # CE64 firmware releases
 
-Latest firmware: **FM67 / Bootloader V5, 2026-09-14**.
+Latest test package: **Bootloader V6 + unchanged FM67, 2026-09-16**.
+[Download the six V6 fused images and installation instructions](V6_FM67_20260916/).
+V6 restores startup USB detection. Physical USB testing is pending; install
+using full-image SWD or full-flash USB DFU, not an app-only SD/BLE update.
+Console .170 is unchanged and still bundles the V5 images below.
+
+Previous package: **FM67 / Bootloader V5, 2026-09-14** (retained for rollback).
 
 Download one fused HEX matching the logger's hardware pinout and intended role:
 
