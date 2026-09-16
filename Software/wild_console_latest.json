@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.169",
-  "url": "https://github.com/ayalab1/Neurologger/raw/9ee7ce4bd2ee734d2e22e76d5278da15fec81251/Software/wild_console_Setup_3.4.2.169.exe",
-  "sha256": "C94F79B8259C38D88A0E891913EBA928FC68CE99E30C6149B5ECF6FB4914ABAD",
-  "notes": "Adds a four-panel CL events viewer with triggered waveforms, bounded PC-side Gabor spectra, independent microvolt scales and received-event counters. Includes scheduler reply/reconnect and MISC export fixes. Existing FM65 V5 firmware images are unchanged. Build, offline spectrum tests and source review passed; live-device CL validation remains pending. Separate continuous MCU spectrum mode is not enabled."
+  "version": "3.4.2.170",
+  "url": "https://github.com/ayalab1/Neurologger/raw/17000ceb28b2eb976d38d56b880ea14fbc9ee5ab/Software/wild_console_Setup_3.4.2.170.exe",
+  "sha256": "F267FF831EEDA01C02EBA7F429D08F070D69B355B8E3E52BD70F741619D2E64F",
+  "notes": "PC-only hotfix: bounded post-sync device-information retries without full resync, plus canceled-request ownership repair on reconnect. Build, deterministic tests and BLE review passed; new-core live validation remains pending. Bundles unchanged six FM67 V5 images. Malformed advertisements and the known bank-B export decoder limitation are not fixed; preserve original SD data."
 }
