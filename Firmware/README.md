@@ -36,10 +36,10 @@ Host extraction fixtures are not a guarantee of an interrupted-device recovery.
 
 ## Downloader warning
 
-The installed/public Console 3.4.2.169 decoder has a known bank-B signed-carry
-defect. Validation used the corrected development decoder. This firmware-only
-publication does not update the installer or certify exports made by the old
-decoder. Keep original SD data until downloading with the corrected decoder.
+Console 3.4.2.169 and 3.4.2.170 have a known bank-B signed-carry decoder
+defect. Validation used the corrected development decoder. The .170 PC-control
+hotfix does not change that decoder or certify its exports. Keep original SD
+data until downloading with the corrected decoder.
 
 Older releases remain recoverable in [legacy](legacy/), including the archived
 [FM66 package and notes](legacy/FM66_20260910/). No recordings were erased or

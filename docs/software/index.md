@@ -39,7 +39,7 @@ Software documentation covers how to connect to the WILD device, configure recor
 
 ## Install
 
-Download [WILD Console 3.4.2.169](https://github.com/ayalab1/Neurologger/raw/main/Software/wild_console_Setup_3.4.2.169.exe). Existing installations can also use the Console's update prompt. Device firmware is available from the [FM67 firmware downloads and validation notes](https://github.com/ayalab1/Neurologger/tree/main/Firmware). FM67 is a firmware-only release; its notes describe the known decoder limitation in the existing Console installer.
+Download [WILD Console 3.4.2.170](https://github.com/ayalab1/Neurologger/raw/main/Software/wild_console_Setup_3.4.2.170.exe). Existing installations can also use the Console's update prompt. This PC-only hotfix adds bounded device-information retries without restarting synchronization. The installer bundles the unchanged [FM67 firmware images](https://github.com/ayalab1/Neurologger/tree/main/Firmware). Read the [validation limits and remaining decoder warning](https://github.com/ayalab1/Neurologger/blob/main/Software/WILD_CONSOLE_3.4.2.170.md) before exporting data.
 
 ## Public Workflow Boundary
 
