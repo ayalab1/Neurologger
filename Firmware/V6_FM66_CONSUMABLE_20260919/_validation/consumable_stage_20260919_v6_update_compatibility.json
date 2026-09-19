@@ -1,0 +1,252 @@
+{
+  "status": "PASS",
+  "format": "CE64_V4_UPDATE_COMPATIBILITY_FIXTURE_V1",
+  "release_root": "D:\\Code\\CE64\\MDK-ARM\\Release\\FM66_BL6_CONSUMABLE_STAGE_20260919",
+  "single_selected_artifact": "fused_hex",
+  "variants": [
+    {
+      "name": "WILD64X_HW1_Auto",
+      "hardware": "HW1",
+      "pinout": "v1",
+      "role": "auto",
+      "fused_hex": "D:\\Code\\CE64\\MDK-ARM\\Release\\FM66_BL6_CONSUMABLE_STAGE_20260919\\WILD64X_HW1_Auto\\WILD64X_HW1_Auto_V6_FM66_consumable_stage_20260919.hex",
+      "public_files": [
+        "WILD64X_HW1_Auto_V6_FM66_consumable_stage_20260919.hex",
+        "WILD64X_HW1_Auto_V6_FM66_consumable_stage_20260919.json"
+      ],
+      "application_base": "0x08020000",
+      "application_limit": "0x08140000",
+      "application_bytes": 273552,
+      "application_sha256": "ac9f5afa1b526f8d4a3c9346cc92b1b03963da8014f2ede99826a006c5a914da",
+      "generation": 20260919,
+      "image_crc32": "0xE04A73DB",
+      "manifest_crc32": "0xCC64058C",
+      "release_flags": "0x64000100",
+      "loader_sha256": "465d99ff7e7e7e3228d689fae7b716231df809bcc4b511614a9799b8639233d5",
+      "service_sha256": "5fb37e53aeb9a084a9f236d969331483017b3b7ecc0b025d3c0d21acac85584e",
+      "sd": {
+        "legacy_magic_bytes": "44414f4c544f4f42",
+        "crc16": "0xBA25",
+        "header_generation": 20260919,
+        "manifest_generation_preserved": true,
+        "installed_manifest_crc32": "0x3D8CC84F",
+        "installed_role": "auto"
+      },
+      "usb_dfu": {
+        "application_first": true,
+        "manifest_last": true
+      },
+      "ble_ota": {
+        "bytes": 274432,
+        "manifest_and_generation_preserved": true
+      },
+      "interrupted_update": "non-bootable until VALID manifest commit",
+      "warnings": []
+    },
+    {
+      "name": "WILD64X_HW1_Master",
+      "hardware": "HW1",
+      "pinout": "v1",
+      "role": "master",
+      "fused_hex": "D:\\Code\\CE64\\MDK-ARM\\Release\\FM66_BL6_CONSUMABLE_STAGE_20260919\\WILD64X_HW1_Master\\WILD64X_HW1_Master_V6_FM66_consumable_stage_20260919.hex",
+      "public_files": [
+        "WILD64X_HW1_Master_V6_FM66_consumable_stage_20260919.hex",
+        "WILD64X_HW1_Master_V6_FM66_consumable_stage_20260919.json"
+      ],
+      "application_base": "0x08020000",
+      "application_limit": "0x08140000",
+      "application_bytes": 273456,
+      "application_sha256": "1bd5ba4016162556b5cbbd555645a44fe80dfe235dfdfabc46d116c24f98320a",
+      "generation": 20260919,
+      "image_crc32": "0xB5E5663E",
+      "manifest_crc32": "0x2082803C",
+      "release_flags": "0x64000110",
+      "loader_sha256": "465d99ff7e7e7e3228d689fae7b716231df809bcc4b511614a9799b8639233d5",
+      "service_sha256": "5fb37e53aeb9a084a9f236d969331483017b3b7ecc0b025d3c0d21acac85584e",
+      "sd": {
+        "legacy_magic_bytes": "44414f4c544f4f42",
+        "crc16": "0x35C8",
+        "header_generation": 20260919,
+        "manifest_generation_preserved": true,
+        "installed_manifest_crc32": "0xD9D455FC",
+        "installed_role": "master"
+      },
+      "usb_dfu": {
+        "application_first": true,
+        "manifest_last": true
+      },
+      "ble_ota": {
+        "bytes": 274432,
+        "manifest_and_generation_preserved": true
+      },
+      "interrupted_update": "non-bootable until VALID manifest commit",
+      "warnings": []
+    },
+    {
+      "name": "WILD64X_HW1_Slave",
+      "hardware": "HW1",
+      "pinout": "v1",
+      "role": "slave",
+      "fused_hex": "D:\\Code\\CE64\\MDK-ARM\\Release\\FM66_BL6_CONSUMABLE_STAGE_20260919\\WILD64X_HW1_Slave\\WILD64X_HW1_Slave_V6_FM66_consumable_stage_20260919.hex",
+      "public_files": [
+        "WILD64X_HW1_Slave_V6_FM66_consumable_stage_20260919.hex",
+        "WILD64X_HW1_Slave_V6_FM66_consumable_stage_20260919.json"
+      ],
+      "application_base": "0x08020000",
+      "application_limit": "0x08140000",
+      "application_bytes": 273456,
+      "application_sha256": "d4a18bcfa9cc0876b31d8e7cabfdc4c352b6fc826145577d6f104c57531da4bd",
+      "generation": 20260919,
+      "image_crc32": "0xF3BFFD4F",
+      "manifest_crc32": "0x4AD8D61A",
+      "release_flags": "0x64000120",
+      "loader_sha256": "465d99ff7e7e7e3228d689fae7b716231df809bcc4b511614a9799b8639233d5",
+      "service_sha256": "5fb37e53aeb9a084a9f236d969331483017b3b7ecc0b025d3c0d21acac85584e",
+      "sd": {
+        "legacy_magic_bytes": "44414f4c544f4f42",
+        "crc16": "0xADB7",
+        "header_generation": 20260919,
+        "manifest_generation_preserved": true,
+        "installed_manifest_crc32": "0x73BD0785",
+        "installed_role": "slave"
+      },
+      "usb_dfu": {
+        "application_first": true,
+        "manifest_last": true
+      },
+      "ble_ota": {
+        "bytes": 274432,
+        "manifest_and_generation_preserved": true
+      },
+      "interrupted_update": "non-bootable until VALID manifest commit",
+      "warnings": []
+    },
+    {
+      "name": "WILD64X_HW2_Auto",
+      "hardware": "HW2",
+      "pinout": "v2",
+      "role": "auto",
+      "fused_hex": "D:\\Code\\CE64\\MDK-ARM\\Release\\FM66_BL6_CONSUMABLE_STAGE_20260919\\WILD64X_HW2_Auto\\WILD64X_HW2_Auto_V6_FM66_consumable_stage_20260919.hex",
+      "public_files": [
+        "WILD64X_HW2_Auto_V6_FM66_consumable_stage_20260919.hex",
+        "WILD64X_HW2_Auto_V6_FM66_consumable_stage_20260919.json"
+      ],
+      "application_base": "0x08020000",
+      "application_limit": "0x08140000",
+      "application_bytes": 273432,
+      "application_sha256": "f5ce4d048719658063e1ada316404456ee71ee37bfe17a4a24ebd2b39781dfc0",
+      "generation": 20260919,
+      "image_crc32": "0xE2B4148F",
+      "manifest_crc32": "0x85CE07A6",
+      "release_flags": "0x64000200",
+      "loader_sha256": "465d99ff7e7e7e3228d689fae7b716231df809bcc4b511614a9799b8639233d5",
+      "service_sha256": "5fb37e53aeb9a084a9f236d969331483017b3b7ecc0b025d3c0d21acac85584e",
+      "sd": {
+        "legacy_magic_bytes": "44414f4c544f4f42",
+        "crc16": "0x76FB",
+        "header_generation": 20260919,
+        "manifest_generation_preserved": true,
+        "installed_manifest_crc32": "0xD87EE821",
+        "installed_role": "auto"
+      },
+      "usb_dfu": {
+        "application_first": true,
+        "manifest_last": true
+      },
+      "ble_ota": {
+        "bytes": 274432,
+        "manifest_and_generation_preserved": true
+      },
+      "interrupted_update": "non-bootable until VALID manifest commit",
+      "warnings": []
+    },
+    {
+      "name": "WILD64X_HW2_Master",
+      "hardware": "HW2",
+      "pinout": "v2",
+      "role": "master",
+      "fused_hex": "D:\\Code\\CE64\\MDK-ARM\\Release\\FM66_BL6_CONSUMABLE_STAGE_20260919\\WILD64X_HW2_Master\\WILD64X_HW2_Master_V6_FM66_consumable_stage_20260919.hex",
+      "public_files": [
+        "WILD64X_HW2_Master_V6_FM66_consumable_stage_20260919.hex",
+        "WILD64X_HW2_Master_V6_FM66_consumable_stage_20260919.json"
+      ],
+      "application_base": "0x08020000",
+      "application_limit": "0x08140000",
+      "application_bytes": 273336,
+      "application_sha256": "2cae79a47a17bf89542ff437c600dc45388547e36e32fff6077cd0d443474ed1",
+      "generation": 20260919,
+      "image_crc32": "0x4FD81630",
+      "manifest_crc32": "0x07999B96",
+      "release_flags": "0x64000210",
+      "loader_sha256": "465d99ff7e7e7e3228d689fae7b716231df809bcc4b511614a9799b8639233d5",
+      "service_sha256": "5fb37e53aeb9a084a9f236d969331483017b3b7ecc0b025d3c0d21acac85584e",
+      "sd": {
+        "legacy_magic_bytes": "44414f4c544f4f42",
+        "crc16": "0x3D8C",
+        "header_generation": 20260919,
+        "manifest_generation_preserved": true,
+        "installed_manifest_crc32": "0x0DE541D5",
+        "installed_role": "master"
+      },
+      "usb_dfu": {
+        "application_first": true,
+        "manifest_last": true
+      },
+      "ble_ota": {
+        "bytes": 273920,
+        "manifest_and_generation_preserved": true
+      },
+      "interrupted_update": "non-bootable until VALID manifest commit",
+      "warnings": []
+    },
+    {
+      "name": "WILD64X_HW2_Slave",
+      "hardware": "HW2",
+      "pinout": "v2",
+      "role": "slave",
+      "fused_hex": "D:\\Code\\CE64\\MDK-ARM\\Release\\FM66_BL6_CONSUMABLE_STAGE_20260919\\WILD64X_HW2_Slave\\WILD64X_HW2_Slave_V6_FM66_consumable_stage_20260919.hex",
+      "public_files": [
+        "WILD64X_HW2_Slave_V6_FM66_consumable_stage_20260919.hex",
+        "WILD64X_HW2_Slave_V6_FM66_consumable_stage_20260919.json"
+      ],
+      "application_base": "0x08020000",
+      "application_limit": "0x08140000",
+      "application_bytes": 273336,
+      "application_sha256": "032d8fd3e6aaefbf7124351a6ba5d13ffda334929ddbeb1563507a3839374dd2",
+      "generation": 20260919,
+      "image_crc32": "0x09828D41",
+      "manifest_crc32": "0xA1DB9773",
+      "release_flags": "0x64000220",
+      "loader_sha256": "465d99ff7e7e7e3228d689fae7b716231df809bcc4b511614a9799b8639233d5",
+      "service_sha256": "5fb37e53aeb9a084a9f236d969331483017b3b7ecc0b025d3c0d21acac85584e",
+      "sd": {
+        "legacy_magic_bytes": "44414f4c544f4f42",
+        "crc16": "0xA5F3",
+        "header_generation": 20260919,
+        "manifest_generation_preserved": true,
+        "installed_manifest_crc32": "0xA78C13AC",
+        "installed_role": "slave"
+      },
+      "usb_dfu": {
+        "application_first": true,
+        "manifest_last": true
+      },
+      "ble_ota": {
+        "bytes": 273920,
+        "manifest_and_generation_preserved": true
+      },
+      "interrupted_update": "non-bootable until VALID manifest commit",
+      "warnings": []
+    }
+  ],
+  "source_contracts": {
+    "automatic_sd": "after USB BOOT_APPLICATION; immediate for invalid app",
+    "forced_sd": "immediate INSTALL_SD mailbox path",
+    "usb_boot_probe_ms": 2000,
+    "usb_configured_policy": "stay in service until explicit ENTER_LOGGER/reset",
+    "usb_dfu_sd_policy": "invalidate and read-back sector 0x1000 before ROM DFU",
+    "transaction": "prevalidate, INSTALLING, erase/program/verify, VALID last",
+    "upgrade_led": "validation plus internal-flash waits/manifest commit",
+    "external_blockers": []
+  }
+}

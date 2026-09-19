@@ -1,0 +1,74 @@
+﻿{
+    "format":  "CE64_V6_RELEASE_FILE_MANIFEST",
+    "generation":  20260919,
+    "firmware_version":  66,
+    "bootloader_version":  6,
+    "build_stamp":  "consumable_stage_20260919",
+    "files":  [
+                  {
+                      "path":  "_validation/consumable_stage_20260919_v6_update_compatibility.json",
+                      "bytes":  10297,
+                      "sha256":  "ee7f470be3b65147b97562d39dda31d80fb6c073e48eff16b5cfb8be28576847"
+                  },
+                  {
+                      "path":  "WILD64X_HW1_Auto/WILD64X_HW1_Auto_V6_FM66_consumable_stage_20260919.hex",
+                      "bytes":  1436049,
+                      "sha256":  "2043617e82bb5be825a7cbcc0e2c3da35eb3d6d82c392403e87f0bc4acbfbb25"
+                  },
+                  {
+                      "path":  "WILD64X_HW1_Auto/WILD64X_HW1_Auto_V6_FM66_consumable_stage_20260919.json",
+                      "bytes":  7688,
+                      "sha256":  "cb5087f727db76bc93e16160f859c6065427329456f52299605fa397ef26994c"
+                  },
+                  {
+                      "path":  "WILD64X_HW1_Master/WILD64X_HW1_Master_V6_FM66_consumable_stage_20260919.hex",
+                      "bytes":  1435779,
+                      "sha256":  "3298865529e9d04ffe7d18d4107afd3a27b76550d626365665fac8ae46393865"
+                  },
+                  {
+                      "path":  "WILD64X_HW1_Master/WILD64X_HW1_Master_V6_FM66_consumable_stage_20260919.json",
+                      "bytes":  7694,
+                      "sha256":  "2e61c98c852b6059f4e0c3f08c7cb98a0c490c9010d682f877e1290ce7efe098"
+                  },
+                  {
+                      "path":  "WILD64X_HW1_Slave/WILD64X_HW1_Slave_V6_FM66_consumable_stage_20260919.hex",
+                      "bytes":  1435779,
+                      "sha256":  "c131fcace7bb35021e77dfa348ca20441c8ad6c1b91006f84a4672fcf87bfa46"
+                  },
+                  {
+                      "path":  "WILD64X_HW1_Slave/WILD64X_HW1_Slave_V6_FM66_consumable_stage_20260919.json",
+                      "bytes":  7692,
+                      "sha256":  "fa33afa770eb6c7743d7aec5076b7e467afd52af96362582fa675525655b8782"
+                  },
+                  {
+                      "path":  "WILD64X_HW2_Auto/WILD64X_HW2_Auto_V6_FM66_consumable_stage_20260919.hex",
+                      "bytes":  1435718,
+                      "sha256":  "a3e7a966b5d1d0bd13312eccf02cb862faac0670b3094013c445d9da90851f53"
+                  },
+                  {
+                      "path":  "WILD64X_HW2_Auto/WILD64X_HW2_Auto_V6_FM66_consumable_stage_20260919.json",
+                      "bytes":  7688,
+                      "sha256":  "e4a8ec72bc509834731c5776d6fce201bb4a5465e93aa49cc9b6eeb5cd4dbece"
+                  },
+                  {
+                      "path":  "WILD64X_HW2_Master/WILD64X_HW2_Master_V6_FM66_consumable_stage_20260919.hex",
+                      "bytes":  1435448,
+                      "sha256":  "964aca9409fd72f6f100784f432e9d9f7bac6b13086d611edb5580d0d4dc52ef"
+                  },
+                  {
+                      "path":  "WILD64X_HW2_Master/WILD64X_HW2_Master_V6_FM66_consumable_stage_20260919.json",
+                      "bytes":  7694,
+                      "sha256":  "b878e855754e0eb66567184c7f99a61a60d6f22166431f190ae88e60eb3341a1"
+                  },
+                  {
+                      "path":  "WILD64X_HW2_Slave/WILD64X_HW2_Slave_V6_FM66_consumable_stage_20260919.hex",
+                      "bytes":  1435448,
+                      "sha256":  "c42d05241b262fed636190ffa650515e9b224ab8502a33ff9a508c53a58a2a3c"
+                  },
+                  {
+                      "path":  "WILD64X_HW2_Slave/WILD64X_HW2_Slave_V6_FM66_consumable_stage_20260919.json",
+                      "bytes":  7691,
+                      "sha256":  "ba676bb23327d28f6a7f32316fa12f5d47f0fb7fc37c5f3fd6c534e203dc3992"
+                  }
+              ]
+}

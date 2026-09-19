@@ -28,5 +28,6 @@ Firmware/*
 !Firmware/CE64_V4_FM*.hex
 !Firmware/CE64_V5_FM*.hex
 !Firmware/V6_FM67_20260916/
+!Firmware/V6_FM66_CONSUMABLE_20260919/
 !Firmware/README.md
 _codex_reference_validation/

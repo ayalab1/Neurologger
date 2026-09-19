@@ -6,6 +6,11 @@ V6 restores startup USB detection. Physical USB testing is pending; install
 using full-image SWD or full-flash USB DFU, not an app-only SD/BLE update.
 Console .170 is unchanged and still bundles the V5 images below.
 
+Additional test package: [Bootloader V6 + FM66 consumable SD-stage behavior,
+2026-09-19](V6_FM66_CONSUMABLE_20260919/). It is intentionally kept separate:
+its bootloader consumes a successfully installed SD stage, but its application
+is FM66 rather than the FM67 application above.
+
 Previous package: **FM67 / Bootloader V5, 2026-09-14** (retained for rollback).
 
 Download one fused HEX matching the logger's hardware pinout and intended role:
