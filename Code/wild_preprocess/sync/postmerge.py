@@ -830,7 +830,8 @@ def validate_segment_staged_merge(
     second-order filter. Warm-up and measurement stay inside the same valid
     master/slave segment intersection. Omitting it preserves unfiltered direct
     callers; the pipeline supplies its configured synchronization cutoff.
-    An unavailable island is a recoverable ``WARN``. Reliable residual lag is
+    An unavailable island or requested window too short for the lag search is
+    a recoverable ``WARN``. Reliable residual lag is
     recorded against its independently fitted segment so repeated consistent
     measurements can refine the mapping. No correlation measurement directly
     recommends zero-filling measured neural data.
@@ -977,10 +978,11 @@ def validate_segment_staged_merge(
     # Explicit validity gaps can be dense; require a local valid island, not
     # an uninterrupted configured (historically 10-second) window.
     maximum_window_samples = max(4, n_output_samples // len(_POSITION_NAMES))
-    window_samples = min(
-        max(requested_window, min_island_samples), maximum_window_samples
-    )
-    lag_support_available = maximum_window_samples >= min_island_samples
+    # Do not expand a short request or clip the requested lag search to make
+    # a measurement appear available. Longer requests can still use a shorter
+    # valid island when it provides the full lag support.
+    window_samples = min(requested_window, maximum_window_samples)
+    lag_support_available = window_samples >= min_island_samples
     bounds = _device_channel_bounds(recordings)
     validity_order = [master_index, *(index for index in range(len(recordings)) if index != master_index)]
     validity_channel = {device_index: channel for channel, device_index in enumerate(validity_order)}

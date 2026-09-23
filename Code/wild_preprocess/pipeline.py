@@ -113,21 +113,28 @@ from .pc_time import (
 )
 
 
-def _postmerge_lag_limit_samples(options: SyncOptions, fs: int) -> int:
-    """Convert the analysis-facing millisecond tolerance to sample support."""
+def _continuity_lag_limit_samples(options: SyncOptions, fs: int) -> float:
+    """Convert the clock-continuity allowance without a legacy sample floor."""
 
     if fs <= 0:
         raise ValueError("post-merge lag tolerance requires a positive sample rate")
-    if int(options.postmerge_max_residual_lag_samples) < 0:
-        raise ValueError("postmerge_max_residual_lag_samples must be non-negative")
     if (
         not math.isfinite(options.postmerge_max_residual_lag_ms)
         or options.postmerge_max_residual_lag_ms < 0
     ):
         raise ValueError("postmerge_max_residual_lag_ms must be finite and non-negative")
+    return options.postmerge_max_residual_lag_ms * fs / 1_000.0
+
+
+def _postmerge_lag_limit_samples(options: SyncOptions, fs: int) -> int:
+    """Preserve the legacy sample floor for integer-lag post-merge QC."""
+
+    millisecond_limit = _continuity_lag_limit_samples(options, fs)
+    if int(options.postmerge_max_residual_lag_samples) < 0:
+        raise ValueError("postmerge_max_residual_lag_samples must be non-negative")
     return max(
         int(options.postmerge_max_residual_lag_samples),
-        int(math.ceil(options.postmerge_max_residual_lag_ms * fs / 1_000.0)),
+        int(math.ceil(millisecond_limit)),
     )
 
 
@@ -1220,7 +1227,7 @@ def run_multidevice_sync(
                 finally:
                     close_memmap(master_feature)
                     close_memmap(slave_feature)
-            continuity_limit = _postmerge_lag_limit_samples(options, master.fs)
+            continuity_limit = _continuity_lag_limit_samples(options, master.fs)
             adaptive_points, continuity_boundaries = select_continuity_boundaries(
                 tuple(adaptive_points), validation_observations, model, options,
                 max_error_samples=continuity_limit,

@@ -262,6 +262,8 @@ class SegmentPostMergeTest(unittest.TestCase):
                 )
             estimator.assert_not_called()
             self.assertEqual(result.status, "WARN")
+            self.assertEqual(result.window_samples, 10)
+            self.assertTrue(result.measurements)
             self.assertTrue(all(item.lag_samples is None for item in result.measurements))
             self.assertFalse(
                 postmerge_exclusion_intervals(
