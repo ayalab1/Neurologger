@@ -14,6 +14,150 @@ from ..models import (
 from .gaps import AdaptiveChangePoint, detect_relative_offset_steps
 
 
+def _is_reliable_model_observation(item: SyncObservation, options: SyncOptions) -> bool:
+    return bool(
+        item.accepted and item.model_inlier
+        and np.isfinite(item.observed_offset_samples)
+        and item.peak_correlation >= options.min_peak_correlation
+        and item.peak_to_background >= options.min_peak_to_background
+        and item.peak_margin_fraction >= options.min_peak_margin_fraction
+        and not item.search_mode.startswith("coarse")
+    )
+
+
+def _continuous_bracket_evidence(
+    observations: list[SyncObservation],
+    model: SyncModel,
+    options: SyncOptions,
+    left: int,
+    right: int,
+    max_error_samples: float,
+    *,
+    allow_terminal_short_span: bool = False,
+) -> dict[str, object] | None:
+    """Check two-sided affine support, conditional on continuous stable clocks."""
+    if (
+        left < 0 or right >= len(observations) or left >= right
+        or not np.isfinite(model.residual_rms_samples)
+        or model.residual_rms_samples > options.max_model_rms_samples
+        or model.residual_max_abs_samples > options.max_model_residual_samples
+    ):
+        return None
+
+    if not _is_reliable_model_observation(observations[left], options) or not _is_reliable_model_observation(observations[right], options):
+        return None
+    horizon = max(3, 4 * options.gap_persistence_observations)
+    sides = (
+        [item for item in observations[max(0, left - horizon + 1):left + 1] if _is_reliable_model_observation(item, options)],
+        [item for item in observations[right:right + horizon] if _is_reliable_model_observation(item, options)],
+    )
+    if any(len(side) < 3 for side in sides):
+        return None
+    first_time, last_time = sides[0][0].center_time_sec, sides[1][-1].center_time_sec
+    if any(first_time <= step.time_sec <= last_time for step in model.offset_steps):
+        return None
+    bracket = np.asarray([observations[left].center_time_sec, observations[right].center_time_sec])
+    predicted = np.asarray([model.offset_at_seconds(time) for time in bracket])
+    maximum_error = 0.0
+    terminal_short_span = False
+    for side_index, side in enumerate(sides):
+        times = np.asarray([item.center_time_sec for item in side])
+        values = np.asarray([item.observed_offset_samples for item in side])
+        if np.ptp(times) < options.window_seconds:
+            if not (
+                allow_terminal_short_span and side_index == 1
+                and side[-1] is observations[-1]
+                and np.ptp(times) >= options.step_seconds
+            ):
+                return None
+            terminal_short_span = True
+        # Center the fit to avoid conditioning errors late in a recording.
+        fit = np.polyfit(times - bracket[0], values, 1)
+        residual = float(np.max(np.abs(values - np.polyval(fit, times - bracket[0]))))
+        disagreement = float(np.max(np.abs(np.polyval(fit, bracket - bracket[0]) - predicted)))
+        common_error = max(abs(item.observed_offset_samples - model.offset_at_seconds(item.center_time_sec)) for item in side)
+        maximum_error = max(maximum_error, residual + disagreement, common_error)
+    if not np.isfinite(maximum_error) or maximum_error > max_error_samples:
+        return None
+    return {
+        "start_time_sec": float(bracket[0]),
+        "end_time_sec": float(bracket[1]),
+        "before_anchor_count": len(sides[0]),
+        "after_anchor_count": len(sides[1]),
+        "maximum_model_disagreement_samples": maximum_error,
+        "terminal_short_span": terminal_short_span,
+        "evidence": "two-sided affine continuity; inferred timing, not a measured correlation",
+    }
+
+
+def supported_observation_gaps(
+    observations: list[SyncObservation],
+    model: SyncModel,
+    options: SyncOptions,
+    *,
+    max_error_samples: float,
+    barriers: tuple[AdaptiveChangePoint, ...] = (),
+) -> tuple[tuple[int, ...], tuple[dict[str, object], ...]]:
+    """Bracket weak/rejected model evidence without creating measured anchors."""
+    supported: list[int] = []
+    intervals: list[dict[str, object]] = []
+    index = 0
+    while index < len(observations):
+        if _is_reliable_model_observation(observations[index], options):
+            index += 1
+            continue
+        start = index
+        while index < len(observations) and not _is_reliable_model_observation(observations[index], options):
+            index += 1
+        evidence = _continuous_bracket_evidence(
+            observations, model, options, start - 1, index, max_error_samples
+        )
+        if evidence is None or any(
+            evidence["start_time_sec"] <= point.time_sec <= evidence["end_time_sec"]
+            for point in barriers
+        ):
+            continue
+        supported.extend(range(start, index))
+        intervals.append({**evidence, "observation_indices": list(range(start, index))})
+    return tuple(supported), tuple(intervals)
+
+
+def select_continuity_boundaries(
+    points: tuple[AdaptiveChangePoint, ...],
+    observations: list[SyncObservation],
+    model: SyncModel,
+    options: SyncOptions,
+    *,
+    max_error_samples: float,
+) -> tuple[tuple[AdaptiveChangePoint, ...], tuple[dict[str, object], ...]]:
+    """Do not promote explained lag rounding into structural data loss.
+
+    Independently localized changes remain barriers regardless of their size.
+    The detector's candidates remain available as explicit diagnostics.
+    """
+    retained: list[AdaptiveChangePoint] = []
+    explained: list[dict[str, object]] = []
+    times = np.asarray([item.center_time_sec for item in observations])
+    for point in points:
+        evidence = None
+        if not point.sample_localized and abs(point.delta_samples) <= max_error_samples:
+            right = int(np.searchsorted(times, point.time_sec, side="right"))
+            evidence = _continuous_bracket_evidence(
+                observations, model, options, right - 1, right, max_error_samples,
+                allow_terminal_short_span=True,
+            )
+        if point.localization_status == "verified_alias" or evidence is not None:
+            explained.append({
+                "time_sec": point.time_sec,
+                "delta_samples": point.delta_samples,
+                "localization_status": point.localization_status,
+                "evidence": "raw-verified alias" if evidence is None else evidence,
+            })
+        else:
+            retained.append(point)
+    return tuple(retained), tuple(explained)
+
+
 def anchors_from_accepted_observations(
     observations: list[SyncObservation],
     fs: float,
@@ -30,16 +174,7 @@ def anchors_from_accepted_observations(
         raise ValueError("fs must be finite and positive")
     anchors: list[DeviceSyncAnchor] = []
     for observation in sorted(observations, key=lambda item: item.center_time_sec):
-        qualified = (
-            observation.accepted
-            and observation.model_inlier
-            and not observation.search_mode.startswith("coarse")
-            and np.isfinite(observation.observed_offset_samples)
-            and observation.peak_correlation >= options.min_peak_correlation
-            and observation.peak_to_background >= options.min_peak_to_background
-            and observation.peak_margin_fraction >= options.min_peak_margin_fraction
-        )
-        if not qualified:
+        if not _is_reliable_model_observation(observation, options):
             continue
         canonical_sample = int(round(observation.center_time_sec * fs))
         confidence = (

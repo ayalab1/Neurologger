@@ -593,6 +593,8 @@ class SyncPairResult:
     validated_start_master_sample: int = 0
     terminal_crop_master_sample: int | None = None
     terminal_crop_reason: str = ""
+    interpolated_intervals: tuple[dict[str, object], ...] = ()
+    continuity_supported_boundaries: tuple[dict[str, object], ...] = ()
 
     @property
     def final_offset_samples(self) -> float:

@@ -633,23 +633,105 @@ def _write_time_dat(path: Path, n_samples: int, overwrite: bool) -> None:
     replace_atomic(partial, path)
 
 
-def _validity_summary(path: Path, n_samples: int, device_count: int) -> dict[str, object]:
+def _validity_summary(
+    path: Path, n_samples: int, device_count: int,
+    *, sample_range: tuple[int, int] | None = None,
+) -> dict[str, object]:
+    if sample_range is not None and not 0 <= sample_range[0] < sample_range[1] <= n_samples:
+        raise ValueError("retention sample range must be non-empty and within output")
     mapped = np.memmap(path, dtype=np.uint8, mode="r", shape=(n_samples, device_count))
     counts = np.zeros(device_count, dtype=np.int64)
     common_count = 0
+    overlap_counts = np.zeros(device_count, dtype=np.int64)
+    overlap_common = 0
     try:
         for start in range(0, n_samples, 1_000_000):
             block = np.asarray(mapped[start : min(n_samples, start + 1_000_000)]) != 0
             counts += np.count_nonzero(block, axis=0)
             common_count += int(np.count_nonzero(np.all(block, axis=1)))
+            if sample_range is not None:
+                lower, upper = max(start, sample_range[0]), min(start + len(block), sample_range[1])
+                if upper > lower:
+                    overlap = block[lower - start:upper - start]
+                    overlap_counts += np.count_nonzero(overlap, axis=0)
+                    overlap_common += int(np.count_nonzero(np.all(overlap, axis=1)))
     finally:
         close_memmap(mapped)
-    return {
+    summary = {
         "valid_samples_by_channel": counts.tolist(),
         "valid_fraction_by_channel": (counts / max(1, n_samples)).tolist(),
         "common_valid_samples": common_count,
         "common_valid_fraction": common_count / max(1, n_samples),
     }
+    if sample_range is None:
+        return summary
+    denominator = sample_range[1] - sample_range[0]
+    return {
+        "valid_samples_by_channel": overlap_counts.tolist(),
+        "valid_fraction_by_channel": (overlap_counts / denominator).tolist(),
+        "common_valid_samples": overlap_common,
+        "common_valid_fraction": overlap_common / denominator,
+        "denominator_samples": denominator,
+        "denominator_basis": "common_recording_overlap",
+        "output_sample_range": list(sample_range),
+        "output_samples": n_samples,
+        **{"output_" + key: value for key, value in summary.items()},
+    }
+
+
+def summarize_recording_overlap(
+    validity_path: Path,
+    alignment_quality_path: Path | None,
+    recordings: list[Recording],
+    device_sync_segments: list[DeviceSyncSegment],
+    *,
+    canonical_start_sample: int,
+    n_output_samples: int,
+) -> dict[str, object]:
+    """Measure retention within recording extents, not within valid segments.
+
+    Edge affine maps project raw recording endpoints for reporting only.
+    Unsupported tails and internal integrity gaps remain in the denominator;
+    this projection never authorizes rendering beyond verified segment support.
+    """
+    groups = _device_segment_map(device_sync_segments, device_count=len(recordings))
+    extents: list[dict[str, int]] = []
+    for index, recording in enumerate(recordings):
+        segments = [item for item in groups[index] if item.publishable]
+        if not segments:
+            return {"recording_overlap": {
+                "status": "unavailable", "denominator_basis": "output_timeline",
+                "reason": f"device {index + 1} has no verified edge mapping",
+            }}
+        first, last = segments[0], segments[-1]
+        start = int(np.ceil((-first.source_intercept_samples - INTEGER_MAPPING_TOLERANCE_SAMPLES) / first.source_scale))
+        end = int(np.floor((recording.n_samples - 1 - last.source_intercept_samples + INTEGER_MAPPING_TOLERANCE_SAMPLES) / last.source_scale)) + 1
+        extents.append({"device_index": index + 1, "canonical_start_sample": start, "canonical_end_sample": end})
+    start = max(canonical_start_sample, max(item["canonical_start_sample"] for item in extents))
+    end = min(canonical_start_sample + n_output_samples, min(item["canonical_end_sample"] for item in extents))
+    if end <= start:
+        return {"recording_overlap": {
+            "status": "unavailable", "denominator_basis": "output_timeline",
+            "reason": "raw recording extents have no common output interval",
+            "device_recording_extents": extents,
+        }}
+    sample_range = (start - canonical_start_sample, end - canonical_start_sample)
+    result = {"recording_overlap": {
+        "status": "OK", "denominator_basis": "common_recording_overlap",
+        "canonical_start_sample": start, "canonical_end_sample": end,
+        "output_sample_range": list(sample_range), "denominator_samples": end - start,
+        "excluded_output_samples": n_output_samples - (end - start),
+        "device_recording_extents": extents,
+        "evidence": "raw recording endpoints projected by edge affine maps; internal invalidity is retained",
+    }}
+    result["validity_summary"] = _validity_summary(
+        validity_path, n_output_samples, len(recordings), sample_range=sample_range,
+    )
+    if alignment_quality_path is not None:
+        result["alignment_quality_summary"] = _validity_summary(
+            alignment_quality_path, n_output_samples, len(recordings), sample_range=sample_range,
+        )
+    return result
 
 
 def rewrite_staged_ephys_from_segments(

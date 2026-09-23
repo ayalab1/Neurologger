@@ -6,11 +6,14 @@ from ..models import SyncModel, SyncObservation, SyncOptions
 from .observe import LagEstimate
 
 
-def _max_rejected_run(observations: list[SyncObservation]) -> int:
+def _max_rejected_run(
+    observations: list[SyncObservation], supported_indices: tuple[int, ...] = ()
+) -> int:
     longest = 0
     current = 0
-    for observation in observations:
-        if observation.accepted:
+    supported = set(supported_indices)
+    for index, observation in enumerate(observations):
+        if observation.accepted or index in supported:
             current = 0
         else:
             current += 1
@@ -18,11 +21,14 @@ def _max_rejected_run(observations: list[SyncObservation]) -> int:
     return longest
 
 
-def _max_model_outlier_run(observations: list[SyncObservation]) -> int:
+def _max_model_outlier_run(
+    observations: list[SyncObservation], supported_indices: tuple[int, ...] = ()
+) -> int:
     longest = 0
     current = 0
-    for observation in observations:
-        if not observation.accepted or observation.model_inlier:
+    supported = set(supported_indices)
+    for index, observation in enumerate(observations):
+        if not observation.accepted or observation.model_inlier or index in supported:
             current = 0
         else:
             current += 1
@@ -50,7 +56,10 @@ def _persistent_offset_level_shift(
     clean affine drift has zero residual step regardless of its clock rate.
     """
 
-    accepted = [observation for observation in observations if observation.accepted]
+    accepted = [
+        observation for observation in observations
+        if observation.accepted and observation.model_inlier
+    ]
     times = np.asarray([observation.center_time_sec for observation in accepted], dtype=np.float64)
     residuals = np.asarray(
         [
@@ -105,6 +114,9 @@ def validate_pair(
     observations: list[SyncObservation],
     model: SyncModel,
     options: SyncOptions,
+    *,
+    supported_observation_indices: tuple[int, ...] = (),
+    continuous_model_tolerance_samples: float | None = None,
 ) -> tuple[str, str]:
     failures: list[str] = []
     warnings: list[str] = []
@@ -122,10 +134,44 @@ def validate_pair(
     initial_search_half_width = int(np.max(np.abs(initial.lags))) if initial.lags.size else 0
     if initial_search_half_width and abs(initial.lag_samples) >= max(1, initial_search_half_width - 1):
         failures.append("initial correlation peak is at the search boundary")
-    accepted_fraction = model.accepted_count / max(model.observation_count, 1)
+    supported_count = len(supported_observation_indices)
+    # Coarse reacquisition can be a model inlier without being a verified
+    # anchor. Its interpolated support must not be counted twice in coverage.
+    additional_supported_count = sum(
+        not (observations[index].accepted and observations[index].model_inlier)
+        for index in supported_observation_indices
+    )
+    accepted_fraction = (model.accepted_count + additional_supported_count) / max(model.observation_count, 1)
     if accepted_fraction < options.min_accepted_fraction:
-        failures.append(f"accepted windows {accepted_fraction:.1%}")
+        label = "measured/interpolated windows" if supported_count else "accepted windows"
+        failures.append(f"{label} {accepted_fraction:.1%}")
+    if supported_count:
+        notes.append(f"{supported_count} weak/model-outlier windows supported by two-sided clock interpolation")
     accepted_observations = [observation for observation in observations if observation.accepted]
+    inlier_observations = [item for item in accepted_observations if item.model_inlier]
+    model_outlier_run = _max_model_outlier_run(observations, supported_observation_indices)
+    continuous_model_supported = bool(
+        continuous_model_tolerance_samples is not None
+        and inlier_observations
+        and all(
+            np.isfinite(item.observed_offset_samples)
+            and abs(item.observed_offset_samples - model.offset_at_seconds(item.center_time_sec))
+            <= continuous_model_tolerance_samples
+            for item in inlier_observations
+        )
+        # Isolated rejected peaks must not overturn a supported clock model.
+        # Sustained outlier runs still require every measured offset to lie
+        # within the analysis tolerance before continuity can support them.
+        and (
+            model_outlier_run <= options.max_consecutive_model_outliers
+            or all(
+                np.isfinite(item.observed_offset_samples)
+                and abs(item.observed_offset_samples - model.offset_at_seconds(item.center_time_sec))
+                <= continuous_model_tolerance_samples
+                for item in accepted_observations
+            )
+        )
+    )
     low_normalized = [
         observation
         for observation in accepted_observations
@@ -164,11 +210,10 @@ def validate_pair(
         failures.append(f"model RMS {model.residual_rms_samples:.2f} samples")
     if model.residual_max_abs_samples > options.max_model_residual_samples:
         failures.append(f"max model residual {model.residual_max_abs_samples:.1f} samples")
-    rejected_run = _max_rejected_run(observations)
+    rejected_run = _max_rejected_run(observations, supported_observation_indices)
     if rejected_run > options.max_consecutive_rejections:
         failures.append(f"{rejected_run} consecutive rejected windows")
-    model_outlier_run = _max_model_outlier_run(observations)
-    if model_outlier_run > options.max_consecutive_model_outliers:
+    if model_outlier_run > options.max_consecutive_model_outliers and not continuous_model_supported:
         failures.append(f"{model_outlier_run} consecutive model-outlier windows (possible clock discontinuity)")
     # Confirmed large steps are validated globally across all pairs. The local
     # estimator skips only windows crossing those known transitions so smaller
@@ -178,7 +223,10 @@ def validate_pair(
         model,
         options.persistent_level_shift_observations,
     )
-    if _meets_numerical_threshold(max_level_shift, options.max_offset_level_shift_samples):
+    if (
+        _meets_numerical_threshold(max_level_shift, options.max_offset_level_shift_samples)
+        and not continuous_model_supported
+    ):
         failures.append(
             f"persistent offset level shift {max_level_shift:.1f} samples "
             "(possible clock discontinuity)"
@@ -188,7 +236,7 @@ def validate_pair(
     accepted_residual_offsets = [
         observation.observed_offset_samples - model.offset_at_seconds(observation.center_time_sec)
         for observation in observations
-        if observation.accepted
+        if observation.accepted and observation.model_inlier
     ]
     max_offset_step = max(
         (

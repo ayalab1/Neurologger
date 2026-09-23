@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Sequence
 
 import numpy as np
+from scipy.signal import butter, sosfilt
 
 from ..binary_io import close_memmap
 from ..models import (
@@ -61,6 +62,8 @@ class PostMergeMeasurement:
     # isolated or inconsistent failures remain non-destructive warnings.
     segment_canonical_start_sample: int | None = None
     segment_canonical_end_sample: int | None = None
+    highpass_hz: float | None = None
+    filter_warmup_samples: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -815,13 +818,18 @@ def validate_segment_staged_merge(
     peak_exclusion_samples: int = 24,
     dense_step_seconds: float | None = None,
     structural_only: bool = False,
+    highpass_hz: float | None = None,
 ) -> PostMergeValidationResult:
     """Verify staged output against independently fitted device segments.
 
     This is deliberately a pure staging check: it neither changes the DATs
     nor inherits a source step.  It validates global checkpoints, every
     publishable slave-segment interior, and both sides of each publishable
-    join using short contiguous jointly-valid islands (up to one second).
+    join using contiguous jointly-valid islands up to the requested duration.
+    When supplied, ``highpass_hz`` uses the synchronization feature's causal
+    second-order filter. Warm-up and measurement stay inside the same valid
+    master/slave segment intersection. Omitting it preserves unfiltered direct
+    callers; the pipeline supplies its configured synchronization cutoff.
     An unavailable island is a recoverable ``WARN``. Reliable residual lag is
     recorded against its independently fitted segment so repeated consistent
     measurements can refine the mapping. No correlation measurement directly
@@ -873,6 +881,17 @@ def validate_segment_staged_merge(
             max_allowed_abs_lag_samples=max_allowed_abs_lag_samples,
             min_peak_correlation=min_peak_correlation,
         )
+    if highpass_hz is not None and (not np.isfinite(highpass_hz) or not 0 < highpass_hz < fs / 2):
+        return _failure(
+            "post-merge highpass_hz must be finite and between zero and Nyquist",
+            amplifier_path=amplifier_path, master_index=master_index,
+            max_allowed_abs_lag_samples=max_allowed_abs_lag_samples,
+            min_peak_correlation=min_peak_correlation,
+        )
+    highpass = None if highpass_hz is None else butter(2, highpass_hz, btype="highpass", fs=fs, output="sos")
+    # At least five cutoff periods suppress the slowest filter-pole transient;
+    # the 0.5-second minimum also matches the real-data QC comparison.
+    warmup_samples = 0 if highpass_hz is None else int(np.ceil(max(0.5, 5.0 / highpass_hz) * fs))
     if not amplifier_path.is_file():
         return _failure(
             f"staged amplifier output does not exist: {amplifier_path}",
@@ -957,9 +976,7 @@ def validate_segment_staged_merge(
     min_island_samples = max(4, 2 * max_lag_samples + 1)
     # Explicit validity gaps can be dense; require a local valid island, not
     # an uninterrupted configured (historically 10-second) window.
-    maximum_window_samples = min(
-        int(fs), max(4, n_output_samples // len(_POSITION_NAMES))
-    )
+    maximum_window_samples = max(4, n_output_samples // len(_POSITION_NAMES))
     window_samples = min(
         max(requested_window, min_island_samples), maximum_window_samples
     )
@@ -1063,12 +1080,12 @@ def validate_segment_staged_merge(
             lower: int,
             upper: int,
             slave_index: int,
-        ) -> tuple[int, int] | None:
+        ) -> tuple[int, int, int] | None:
             """Stream a segment and retain only its nearest valid island."""
 
             lower = max(0, lower)
             upper = min(n_output_samples, upper)
-            if not lag_support_available or upper - lower < min_island_samples:
+            if not lag_support_available or upper - lower < min_island_samples + warmup_samples:
                 return None
             master_channel = validity_channel[master_index]
             slave_channel = validity_channel[slave_index]
@@ -1080,17 +1097,18 @@ def validate_segment_staged_merge(
 
                 def consider(candidate: tuple[int, int]) -> None:
                     nonlocal best, best_rank
-                    start, end = candidate
-                    if end - start < min_island_samples:
-                        return
-                    distance = 0 if start <= desired_sample < end else min(
-                        abs(desired_sample - start),
-                        abs(desired_sample - (end - 1)),
-                    )
-                    rank = (distance, -(end - start), start)
-                    if best_rank is None or rank < best_rank:
-                        best = candidate
-                        best_rank = rank
+                    for master_segment in segment_groups[master_index + 1]:
+                        master_lower, master_upper = local_bounds(master_segment)
+                        start, end = max(candidate[0], master_lower), min(candidate[1], master_upper)
+                        if end - start < min_island_samples + warmup_samples:
+                            continue
+                        distance = 0 if start <= desired_sample < end else min(
+                            abs(desired_sample - start), abs(desired_sample - (end - 1)),
+                        )
+                        rank = (distance, -(end - start), start)
+                        if best_rank is None or rank < best_rank:
+                            best = (start, end)
+                            best_rank = rank
 
                 for chunk_start in range(
                     search_lower, search_upper, validation_chunk_samples
@@ -1143,22 +1161,22 @@ def validate_segment_staged_merge(
                 search_span = min(total, search_span * 2)
 
             island_start, island_end = island
-            count = min(window_samples, island_end - island_start)
+            count = min(window_samples, island_end - island_start - warmup_samples)
             start = int(
                 np.clip(
                     desired_sample - count // 2,
-                    island_start,
+                    island_start + warmup_samples,
                     island_end - count,
                 )
             )
-            return start, count
+            return start, count, start - warmup_samples
 
         def measure(
             *,
             position: str,
             fraction: float,
             nominal: int,
-            window: tuple[int, int] | None,
+            window: tuple[int, int, int] | None,
             slave_index: int,
             segment_bounds: tuple[int, int],
             segment_identity_bounds: tuple[int, int],
@@ -1183,12 +1201,15 @@ def validate_segment_staged_merge(
                     segment_canonical_end_sample=segment_end,
                 ))
                 return
-            start, count = window
+            start, count, warmup_start = window
             end = start + count
             try:
-                master_common = _common_mode(mapped[start:end, master_start:master_end])
+                master_common = _common_mode(mapped[warmup_start:end, master_start:master_end])
                 slave_start, slave_end = bounds[slave_index]
-                slave_common = _common_mode(mapped[start:end, slave_start:slave_end])
+                slave_common = _common_mode(mapped[warmup_start:end, slave_start:slave_end])
+                if highpass is not None:
+                    master_common = sosfilt(highpass, master_common)[start - warmup_start:]
+                    slave_common = sosfilt(highpass, slave_common)[start - warmup_start:]
                 estimate, expanded = _hierarchical_lag(
                     master_common,
                     slave_common,
@@ -1234,6 +1255,8 @@ def validate_segment_staged_merge(
                     exclusion_device_indices=(slave_index + 1,),
                     segment_canonical_start_sample=segment_start,
                     segment_canonical_end_sample=segment_end,
+                    highpass_hz=highpass_hz,
+                    filter_warmup_samples=start - warmup_start,
                 ))
             except (ValueError, FloatingPointError) as error:
                 measurements.append(PostMergeMeasurement(
@@ -1568,7 +1591,16 @@ def infer_postmerge_segment_corrections(
             unique.setdefault(sample, item)
         if len(unique) < minimum_supporting_measurements:
             continue
-        samples = tuple(sorted(unique))
+        independent_samples: list[int] = []
+        previous_end = -1
+        for sample in sorted(unique, key=lambda value: (unique[value].window_start_sample, unique[value].window_end_sample)):
+            measurement = unique[sample]
+            if measurement.window_start_sample >= previous_end:
+                independent_samples.append(sample)
+                previous_end = measurement.window_end_sample
+        if len(independent_samples) < minimum_supporting_measurements:
+            continue
+        samples = tuple(independent_samples)
         support = [unique[sample] for sample in samples]
         support_lags = tuple(float(item.lag_samples) for item in support)
         corrections.append(
@@ -1763,11 +1795,13 @@ def postmerge_alignment_warning_intervals(
         ):
             start = int(measurement.window_start_sample)
             end = int(measurement.window_end_sample)
-            if windows and start < windows[-1][1]:
+            # Collapse duplicate checkpoints, not a transitive chain of
+            # overlapping 10-second windows sampled every five seconds.
+            if windows and (start, end) == windows[-1][:2]:
                 previous_start, previous_end, previous_measurements = windows[-1]
                 windows[-1] = (
                     previous_start,
-                    max(previous_end, end),
+                    previous_end,
                     [*previous_measurements, measurement],
                 )
             else:
@@ -1783,7 +1817,13 @@ def postmerge_alignment_warning_intervals(
         hard_run: list[tuple[int, int]] = []
 
         def finish_hard_run() -> None:
-            if len(hard_run) >= minimum_continuous_failure_windows:
+            independent_count = 0
+            previous_end = -1
+            for start, end in hard_run:
+                if start >= previous_end:
+                    independent_count += 1
+                    previous_end = end
+            if independent_count >= minimum_continuous_failure_windows:
                 broad_windows.setdefault(key, set()).update(hard_run)
             hard_run.clear()
 
@@ -1817,11 +1857,8 @@ def postmerge_alignment_warning_intervals(
         key = (measurement.slave_device_index, segment_start, segment_end)
         is_broad_failure = bool(
             hard_failure(measurement)
-            and any(
-                measurement.window_start_sample < broad_end
-                and measurement.window_end_sample > broad_start
-                for broad_start, broad_end in broad_windows.get(key, set())
-            )
+            and (measurement.window_start_sample, measurement.window_end_sample)
+            in broad_windows.get(key, set())
         )
         if is_broad_failure:
             grouped.setdefault(key, [])
@@ -1868,9 +1905,8 @@ def postmerge_alignment_warning_intervals(
         if local_segment_end <= local_segment_start:
             continue
         # Global, dense, interior, and join labels can select the same or an
-        # overlapping valid island.  Collapse those observations before the
-        # state machine so one piece of waveform evidence cannot count as two
-        # independent recovery passes.
+        # overlapping valid island. Collapse exact duplicates here and require
+        # non-overlap explicitly when counting failures and recovery passes.
         window_groups = collapsed_windows(measurements)
 
         events: list[dict[str, object]] = []
@@ -1908,11 +1944,15 @@ def postmerge_alignment_warning_intervals(
         def confirmed_pass_before(index: int) -> int | None:
             run = 0
             closest_pass_end: int | None = None
+            next_start = int(events[index]["start"])
             for position in range(index - 1, -1, -1):
                 if events[position]["state"] == "pass":
+                    if int(events[position]["end"]) > next_start:
+                        continue
                     if run == 0:
                         closest_pass_end = int(events[position]["end"])
                     run += 1
+                    next_start = int(events[position]["start"])
                     if run >= recovery_pass_windows:
                         # Return the pass closest to the failure.  Its complete
                         # measured window is known good; uncertainty starts
@@ -1926,13 +1966,18 @@ def postmerge_alignment_warning_intervals(
                     if events[position]["state"] == "fail":
                         run = 0
                         closest_pass_end = None
+                        next_start = int(events[position]["start"])
             return None
 
         def confirmed_pass_after(index: int) -> int | None:
             run = 0
+            previous_end = int(events[index]["end"])
             for position in range(index + 1, len(events)):
                 if events[position]["state"] == "pass":
+                    if int(events[position]["start"]) < previous_end:
+                        continue
                     run += 1
+                    previous_end = int(events[position]["end"])
                     if run >= recovery_pass_windows:
                         # Keep the first recovery pass inside the conservative
                         # interval; the second consecutive pass re-opens it.
@@ -1940,6 +1985,7 @@ def postmerge_alignment_warning_intervals(
                 else:
                     if events[position]["state"] == "fail":
                         run = 0
+                        previous_end = int(events[position]["end"])
             return None
 
         for index, event in enumerate(events):
