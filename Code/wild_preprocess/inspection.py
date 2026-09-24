@@ -466,6 +466,7 @@ def write_session_inspection_png(
     master_gaps: Sequence[DeviceGap | Mapping[str, Any]] = (),
     segment_summary: Sequence[DeviceSyncSegment | Mapping[str, Any]] | Mapping[str, Any] | None = None,
     performance_summary: Mapping[str, Any] | None = None,
+    retention_sample_range: tuple[int, int] | None = None,
 ) -> Path:
     """Write one decision-oriented QC PNG on the canonical sample axis."""
 
@@ -513,6 +514,9 @@ def write_session_inspection_png(
             raise ValueError("device_labels must have one entry per validity channel")
 
     duration_sec = samples / sample_rate_hz
+    if retention_sample_range is not None and not 0 <= retention_sample_range[0] < retention_sample_range[1] <= samples:
+        raise ValueError("retention sample range must be within the plotted output")
+    retention_slice = slice(None) if retention_sample_range is None else slice(*retention_sample_range)
     canonical_start_sec = canonical_start_master_sample / sample_rate_hz
     sorted_pairs = sorted(pairs, key=lambda pair: int(_value(pair, "slave_index", 0)))
     sorted_intervals = sorted(
@@ -655,7 +659,7 @@ def write_session_inspection_png(
     else:
         binned = _conservative_bins(mask, max_mask_bins)
         common_binned = np.all(binned, axis=1)
-        device_valid_fractions, common_valid_fraction = _validity_fractions(mask)
+        device_valid_fractions, common_valid_fraction = _validity_fractions(mask[retention_slice])
         all_binned = np.column_stack((binned, common_binned))
         bin_duration = duration_sec / max(1, all_binned.shape[0])
         row_labels = [
@@ -782,7 +786,7 @@ def write_session_inspection_png(
             + [np.all(alignment_binned, axis=1)]
         )
         pair_fractions, common_alignment_fraction = _alignment_pair_fractions(
-            alignment_mask
+            alignment_mask[retention_slice]
         )
         alignment_labels = [
             f"M-S{slave} aligned   {100.0 * fraction:.3f}%"
@@ -949,6 +953,8 @@ def write_session_inspection_png(
     summary = f"{title} | {duration_sec / 60.0:.2f} min"
     if status:
         summary += f" | {status}"
+    if retention_sample_range is not None:
+        summary += " | retention rates: common recording overlap"
     if np.isfinite(common_valid_fraction):
         summary += f" | common valid {100.0 * common_valid_fraction:.3f}%"
     if np.isfinite(common_alignment_fraction):

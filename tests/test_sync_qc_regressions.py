@@ -16,7 +16,11 @@ if str(CODE_ROOT) not in sys.path:
 
 from wild_preprocess.binary_io import recordings_from_folders
 from wild_preprocess.models import Recording, RelativeOffsetStep, SyncObservation, SyncOptions
-from wild_preprocess.sync.infer import fit_affine_sync_model
+from wild_preprocess.sync.infer import (
+    anchors_from_accepted_observations,
+    fit_affine_sync_model,
+    supported_observation_gaps,
+)
 from wild_preprocess.sync.observe import LagEstimate, _tracking_rejection_reasons, estimate_lag, observe_pair
 from wild_preprocess.sync.validate import validate_pair
 
@@ -248,13 +252,59 @@ class SyncQcRegressionTest(unittest.TestCase):
         self.assertNotIn("clock discontinuity", message)
         self.assertIn("nonblocking persistent offset level shift 8.0", message)
 
-    def test_large_single_jump_still_fails_after_detrending(self) -> None:
+    def test_isolated_model_outliers_do_not_reject_or_anchor_pair(self) -> None:
         options = SyncOptions()
-        observations = _observations([0.0] * 10 + [80.0] + [0.0] * 10)
-        model = fit_affine_sync_model(observations, fs=20_000, options=options)
-        status, message = validate_pair(_initial(), observations, model, options)
-        self.assertEqual(status, "FAIL")
-        self.assertIn("detrended offset step", message)
+        fs = 20_000
+        # The two-window case uses competing peaks, not a persistent new level.
+        for peaks in ([80.0], [80.0, -80.0]):
+            with self.subTest(peaks=peaks):
+                observations = _observations([0.0] * 10 + peaks + [0.0] * 10)
+                model = fit_affine_sync_model(observations, fs=fs, options=options)
+                outlier_indices = tuple(range(10, 10 + len(peaks)))
+                self.assertEqual(
+                    tuple(index for index, item in enumerate(observations) if not item.model_inlier),
+                    outlier_indices,
+                )
+                self.assertEqual(model.accepted_count, 20)
+                self.assertAlmostEqual(model.intercept_samples, 0.0)
+                self.assertAlmostEqual(model.slope_samples_per_second, 0.0)
+                self.assertEqual(model.offset_steps, ())
+
+                # The existing isolated-outlier allowance does not itself
+                # establish two-sided interpolation evidence.
+                status, message = validate_pair(_initial(), observations, model, options)
+                self.assertEqual(status, "OK", message)
+                self.assertNotIn("supported by two-sided clock interpolation", message)
+                supported, intervals = supported_observation_gaps(
+                    observations, model, options, max_error_samples=20.0,
+                )
+                self.assertEqual(supported, outlier_indices)
+                self.assertEqual(len(intervals), 1)
+                self.assertEqual(intervals[0]["observation_indices"], list(outlier_indices))
+                self.assertEqual(intervals[0]["start_time_sec"], observations[9].center_time_sec)
+                self.assertEqual(intervals[0]["end_time_sec"], observations[10 + len(peaks)].center_time_sec)
+                status, message = validate_pair(
+                    _initial(), observations, model, options,
+                    supported_observation_indices=supported,
+                    continuous_model_tolerance_samples=20.0,
+                )
+                self.assertEqual(status, "OK", message)
+                self.assertIn("supported by two-sided clock interpolation", message)
+
+                # Inferred support preserves the measured diagnostics and
+                # never inserts the bad peaks into the rendering anchors.
+                anchors = anchors_from_accepted_observations(observations, fs, options)
+                self.assertEqual(len(anchors), 20)
+                self.assertEqual(
+                    {anchor.canonical_sample for anchor in anchors},
+                    {round(item.center_time_sec * fs) for index, item in enumerate(observations)
+                     if index not in outlier_indices},
+                )
+                self.assertTrue(all(anchor.source_sample == anchor.canonical_sample for anchor in anchors))
+                for index, peak in zip(outlier_indices, peaks):
+                    self.assertTrue(observations[index].accepted)
+                    self.assertFalse(observations[index].model_inlier)
+                    self.assertEqual(observations[index].observed_offset_samples, peak)
 
     def test_shorter_slave_endpoint_is_excluded_from_observation_denominator(self) -> None:
         fs = 100

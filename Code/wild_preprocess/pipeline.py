@@ -68,12 +68,15 @@ from .sync.infer import (
     anchors_from_accepted_observations,
     fit_affine_sync_model,
     fit_independent_device_segments,
+    select_continuity_boundaries,
+    supported_observation_gaps,
 )
 from .sync.merge import (
     EPHYS_SINC_HALF_WIDTH,
     _recover_interrupted_transactions,
     merge_recordings,
     rewrite_staged_ephys_from_segments,
+    summarize_recording_overlap,
     write_alignment_quality,
 )
 from .sync.observe import observe_pair
@@ -110,21 +113,28 @@ from .pc_time import (
 )
 
 
-def _postmerge_lag_limit_samples(options: SyncOptions, fs: int) -> int:
-    """Convert the analysis-facing millisecond tolerance to sample support."""
+def _continuity_lag_limit_samples(options: SyncOptions, fs: int) -> float:
+    """Convert the clock-continuity allowance without a legacy sample floor."""
 
     if fs <= 0:
         raise ValueError("post-merge lag tolerance requires a positive sample rate")
-    if int(options.postmerge_max_residual_lag_samples) < 0:
-        raise ValueError("postmerge_max_residual_lag_samples must be non-negative")
     if (
         not math.isfinite(options.postmerge_max_residual_lag_ms)
         or options.postmerge_max_residual_lag_ms < 0
     ):
         raise ValueError("postmerge_max_residual_lag_ms must be finite and non-negative")
+    return options.postmerge_max_residual_lag_ms * fs / 1_000.0
+
+
+def _postmerge_lag_limit_samples(options: SyncOptions, fs: int) -> int:
+    """Preserve the legacy sample floor for integer-lag post-merge QC."""
+
+    millisecond_limit = _continuity_lag_limit_samples(options, fs)
+    if int(options.postmerge_max_residual_lag_samples) < 0:
+        raise ValueError("postmerge_max_residual_lag_samples must be non-negative")
     return max(
         int(options.postmerge_max_residual_lag_samples),
-        int(math.ceil(options.postmerge_max_residual_lag_ms * fs / 1_000.0)),
+        int(math.ceil(millisecond_limit)),
     )
 
 
@@ -1217,12 +1227,23 @@ def run_multidevice_sync(
                 finally:
                     close_memmap(master_feature)
                     close_memmap(slave_feature)
-            adaptive_points_by_slave[slave_index + 1] = tuple(adaptive_points)
+            continuity_limit = _continuity_lag_limit_samples(options, master.fs)
+            adaptive_points, continuity_boundaries = select_continuity_boundaries(
+                tuple(adaptive_points), validation_observations, model, options,
+                max_error_samples=continuity_limit,
+            )
+            supported_indices, interpolated_intervals = supported_observation_gaps(
+                validation_observations, model, options,
+                max_error_samples=continuity_limit, barriers=adaptive_points,
+            )
+            adaptive_points_by_slave[slave_index + 1] = adaptive_points
             status, message = validate_pair(
                 observed.initial,
                 validation_observations,
                 model,
                 options,
+                supported_observation_indices=supported_indices,
+                continuous_model_tolerance_samples=continuity_limit,
             )
             operational_warnings = [
                 item for item in (isolated_alias_message, terminal_crop_reason) if item
@@ -1278,6 +1299,8 @@ def run_multidevice_sync(
                 validated_start_master_sample=validated_start,
                 terminal_crop_master_sample=terminal_crop_master_sample,
                 terminal_crop_reason=terminal_crop_reason,
+                interpolated_intervals=interpolated_intervals,
+                continuity_supported_boundaries=continuity_boundaries,
             )
             with performance.measure("pair_figure_generation"):
                 save_pair_figure(pair, observed, figure_path)
@@ -1964,7 +1987,8 @@ def run_multidevice_sync(
                     validity_path=Path(staged_outputs["validity"]),
                     canonical_start_sample=int(merge_info["common_start_master_sample"]),
                     n_output_samples=int(merge_info["n_samples"]),
-                    window_seconds=10.0,
+                    window_seconds=options.window_seconds,
+                    highpass_hz=options.highpass_hz,
                     max_lag_samples=options.tracking_max_lag_samples,
                     max_allowed_abs_lag_samples=(
                         postmerge_lag_limit_samples
@@ -2096,6 +2120,13 @@ def run_multidevice_sync(
                 )
                 if progress is not None:
                     progress("postmerge_qc", 95.0)
+        merge_info.update(summarize_recording_overlap(
+            Path(staged_outputs["validity"]),
+            staging / "alignment_quality.dat" if "alignment_quality_summary" in merge_info else None,
+            recordings, list(result.device_sync_segments),
+            canonical_start_sample=int(merge_info["common_start_master_sample"]),
+            n_output_samples=int(merge_info["n_samples"]),
+        ))
         performance.end("postmerge_validation")
         if progress is not None:
             progress("postmerge_qc", 100.0)
@@ -2635,6 +2666,10 @@ def run_multidevice_sync(
                     else None
                 ),
                 n_canonical_samples=int(merge_info["n_samples"]),
+                retention_sample_range=(
+                    tuple(merge_info["recording_overlap"]["output_sample_range"])
+                    if merge_info["recording_overlap"]["status"] == "OK" else None
+                ),
                 canonical_start_master_sample=int(merge_info["common_start_master_sample"]),
                 device_count=len(recordings),
                 device_labels=device_labels,

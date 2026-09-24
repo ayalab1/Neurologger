@@ -16,7 +16,11 @@ if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
 from wild_preprocess.models import SyncOptions
-from wild_preprocess.pipeline import _postmerge_lag_limit_samples, run_multidevice_sync
+from wild_preprocess.pipeline import (
+    _continuity_lag_limit_samples,
+    _postmerge_lag_limit_samples,
+    run_multidevice_sync,
+)
 from wild_preprocess.version import RUN_MANIFEST_SCHEMA_VERSION
 
 
@@ -40,6 +44,11 @@ class PipelineTimingTest(unittest.TestCase):
     def test_postmerge_tolerance_uses_milliseconds_without_weakening_legacy_floor(self) -> None:
         self.assertEqual(_postmerge_lag_limit_samples(SyncOptions(), 20_000), 20)
         self.assertEqual(_postmerge_lag_limit_samples(SyncOptions(), 1_000), 4)
+        # Continuity is measured in milliseconds even below 4 kHz; it must
+        # neither inherit the QC floor nor round up fractional sample limits.
+        self.assertEqual(_continuity_lag_limit_samples(SyncOptions(), 20_000), 20.0)
+        self.assertEqual(_continuity_lag_limit_samples(SyncOptions(), 1_000), 1.0)
+        self.assertEqual(_continuity_lag_limit_samples(SyncOptions(), 500), 0.5)
         self.assertEqual(
             _postmerge_lag_limit_samples(
                 SyncOptions(
