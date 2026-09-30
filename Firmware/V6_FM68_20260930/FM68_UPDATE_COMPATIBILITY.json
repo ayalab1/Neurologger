@@ -1,0 +1,252 @@
+{
+  "status": "PASS",
+  "format": "CE64_V4_UPDATE_COMPATIBILITY_FIXTURE_V1",
+  "release_root": "D:\\Code\\CE64\\_hil\\fm68_release_20260930\\packages",
+  "single_selected_artifact": "fused_hex",
+  "variants": [
+    {
+      "name": "WILD64X_HW1_Auto",
+      "hardware": "HW1",
+      "pinout": "v1",
+      "role": "auto",
+      "fused_hex": "D:\\Code\\CE64\\_hil\\fm68_release_20260930\\packages\\WILD64X_HW1_Auto\\WILD64X_HW1_Auto_V6_FM68_20260930.hex",
+      "public_files": [
+        "WILD64X_HW1_Auto_V6_FM68_20260930.hex",
+        "WILD64X_HW1_Auto_V6_FM68_20260930.json"
+      ],
+      "application_base": "0x08020000",
+      "application_limit": "0x08140000",
+      "application_bytes": 273568,
+      "application_sha256": "e60e7360a172cd0875abb50ae186d57796c6a0aaf644b93a1bf5380366d5caed",
+      "generation": 2026093001,
+      "image_crc32": "0xCF2059E6",
+      "manifest_crc32": "0x1A2CE3C2",
+      "release_flags": "0x64000100",
+      "loader_sha256": "cbe5d601a643d14ed25670acb6975e8bea7742d221258bc07badeeac8588594b",
+      "service_sha256": "fac200129654fefac89d3448d81c743d9f344fa5f1f8373ff0b13f4e4260ab28",
+      "sd": {
+        "legacy_magic_bytes": "44414f4c544f4f42",
+        "crc16": "0x9D39",
+        "header_generation": 2026093001,
+        "manifest_generation_preserved": true,
+        "installed_manifest_crc32": "0xE7A954CC",
+        "installed_role": "auto"
+      },
+      "usb_dfu": {
+        "application_first": true,
+        "manifest_last": true
+      },
+      "ble_ota": {
+        "bytes": 274432,
+        "manifest_and_generation_preserved": true
+      },
+      "interrupted_update": "non-bootable until VALID manifest commit",
+      "warnings": []
+    },
+    {
+      "name": "WILD64X_HW1_Master",
+      "hardware": "HW1",
+      "pinout": "v1",
+      "role": "master",
+      "fused_hex": "D:\\Code\\CE64\\_hil\\fm68_release_20260930\\packages\\WILD64X_HW1_Master\\WILD64X_HW1_Master_V6_FM68_20260930.hex",
+      "public_files": [
+        "WILD64X_HW1_Master_V6_FM68_20260930.hex",
+        "WILD64X_HW1_Master_V6_FM68_20260930.json"
+      ],
+      "application_base": "0x08020000",
+      "application_limit": "0x08140000",
+      "application_bytes": 273440,
+      "application_sha256": "2074ae46509ff16416b965059b091737ba47affabb7ee344273060ddb97b18d6",
+      "generation": 2026093001,
+      "image_crc32": "0xFEAC4FB7",
+      "manifest_crc32": "0xA9959093",
+      "release_flags": "0x64000110",
+      "loader_sha256": "cbe5d601a643d14ed25670acb6975e8bea7742d221258bc07badeeac8588594b",
+      "service_sha256": "fac200129654fefac89d3448d81c743d9f344fa5f1f8373ff0b13f4e4260ab28",
+      "sd": {
+        "legacy_magic_bytes": "44414f4c544f4f42",
+        "crc16": "0x9D94",
+        "header_generation": 2026093001,
+        "manifest_generation_preserved": true,
+        "installed_manifest_crc32": "0xF695699B",
+        "installed_role": "master"
+      },
+      "usb_dfu": {
+        "application_first": true,
+        "manifest_last": true
+      },
+      "ble_ota": {
+        "bytes": 274432,
+        "manifest_and_generation_preserved": true
+      },
+      "interrupted_update": "non-bootable until VALID manifest commit",
+      "warnings": []
+    },
+    {
+      "name": "WILD64X_HW1_Slave",
+      "hardware": "HW1",
+      "pinout": "v1",
+      "role": "slave",
+      "fused_hex": "D:\\Code\\CE64\\_hil\\fm68_release_20260930\\packages\\WILD64X_HW1_Slave\\WILD64X_HW1_Slave_V6_FM68_20260930.hex",
+      "public_files": [
+        "WILD64X_HW1_Slave_V6_FM68_20260930.hex",
+        "WILD64X_HW1_Slave_V6_FM68_20260930.json"
+      ],
+      "application_base": "0x08020000",
+      "application_limit": "0x08140000",
+      "application_bytes": 273440,
+      "application_sha256": "4b2fe45b3043d1beb54f6f0f37f01a2ed34c3459ff1e510efba889afcacfc6b4",
+      "generation": 2026093001,
+      "image_crc32": "0xFAAA7B3E",
+      "manifest_crc32": "0x738206EA",
+      "release_flags": "0x64000120",
+      "loader_sha256": "cbe5d601a643d14ed25670acb6975e8bea7742d221258bc07badeeac8588594b",
+      "service_sha256": "fac200129654fefac89d3448d81c743d9f344fa5f1f8373ff0b13f4e4260ab28",
+      "sd": {
+        "legacy_magic_bytes": "44414f4c544f4f42",
+        "crc16": "0x1B0A",
+        "header_generation": 2026093001,
+        "manifest_generation_preserved": true,
+        "installed_manifest_crc32": "0xE8C63E9F",
+        "installed_role": "slave"
+      },
+      "usb_dfu": {
+        "application_first": true,
+        "manifest_last": true
+      },
+      "ble_ota": {
+        "bytes": 274432,
+        "manifest_and_generation_preserved": true
+      },
+      "interrupted_update": "non-bootable until VALID manifest commit",
+      "warnings": []
+    },
+    {
+      "name": "WILD64X_HW2_Auto",
+      "hardware": "HW2",
+      "pinout": "v2",
+      "role": "auto",
+      "fused_hex": "D:\\Code\\CE64\\_hil\\fm68_release_20260930\\packages\\WILD64X_HW2_Auto\\WILD64X_HW2_Auto_V6_FM68_20260930.hex",
+      "public_files": [
+        "WILD64X_HW2_Auto_V6_FM68_20260930.hex",
+        "WILD64X_HW2_Auto_V6_FM68_20260930.json"
+      ],
+      "application_base": "0x08020000",
+      "application_limit": "0x08140000",
+      "application_bytes": 273472,
+      "application_sha256": "9ea2539879620bb7d050a72e9ff6aa8f541f49fb694fede2f66b79c19f514f21",
+      "generation": 2026093001,
+      "image_crc32": "0x56AC4B20",
+      "manifest_crc32": "0x832F236D",
+      "release_flags": "0x64000200",
+      "loader_sha256": "cbe5d601a643d14ed25670acb6975e8bea7742d221258bc07badeeac8588594b",
+      "service_sha256": "fac200129654fefac89d3448d81c743d9f344fa5f1f8373ff0b13f4e4260ab28",
+      "sd": {
+        "legacy_magic_bytes": "44414f4c544f4f42",
+        "crc16": "0x4444",
+        "header_generation": 2026093001,
+        "manifest_generation_preserved": true,
+        "installed_manifest_crc32": "0x5687B536",
+        "installed_role": "auto"
+      },
+      "usb_dfu": {
+        "application_first": true,
+        "manifest_last": true
+      },
+      "ble_ota": {
+        "bytes": 274432,
+        "manifest_and_generation_preserved": true
+      },
+      "interrupted_update": "non-bootable until VALID manifest commit",
+      "warnings": []
+    },
+    {
+      "name": "WILD64X_HW2_Master",
+      "hardware": "HW2",
+      "pinout": "v2",
+      "role": "master",
+      "fused_hex": "D:\\Code\\CE64\\_hil\\fm68_release_20260930\\packages\\WILD64X_HW2_Master\\WILD64X_HW2_Master_V6_FM68_20260930.hex",
+      "public_files": [
+        "WILD64X_HW2_Master_V6_FM68_20260930.hex",
+        "WILD64X_HW2_Master_V6_FM68_20260930.json"
+      ],
+      "application_base": "0x08020000",
+      "application_limit": "0x08140000",
+      "application_bytes": 273344,
+      "application_sha256": "51918423c71aca6cfe4dd50bc9ef3af58f9918e043ad4733cc08664eaf9570b9",
+      "generation": 2026093001,
+      "image_crc32": "0xB839E1ED",
+      "manifest_crc32": "0x9881A53B",
+      "release_flags": "0x64000210",
+      "loader_sha256": "cbe5d601a643d14ed25670acb6975e8bea7742d221258bc07badeeac8588594b",
+      "service_sha256": "fac200129654fefac89d3448d81c743d9f344fa5f1f8373ff0b13f4e4260ab28",
+      "sd": {
+        "legacy_magic_bytes": "44414f4c544f4f42",
+        "crc16": "0xAFC5",
+        "header_generation": 2026093001,
+        "manifest_generation_preserved": true,
+        "installed_manifest_crc32": "0xB198021B",
+        "installed_role": "master"
+      },
+      "usb_dfu": {
+        "application_first": true,
+        "manifest_last": true
+      },
+      "ble_ota": {
+        "bytes": 273920,
+        "manifest_and_generation_preserved": true
+      },
+      "interrupted_update": "non-bootable until VALID manifest commit",
+      "warnings": []
+    },
+    {
+      "name": "WILD64X_HW2_Slave",
+      "hardware": "HW2",
+      "pinout": "v2",
+      "role": "slave",
+      "fused_hex": "D:\\Code\\CE64\\_hil\\fm68_release_20260930\\packages\\WILD64X_HW2_Slave\\WILD64X_HW2_Slave_V6_FM68_20260930.hex",
+      "public_files": [
+        "WILD64X_HW2_Slave_V6_FM68_20260930.hex",
+        "WILD64X_HW2_Slave_V6_FM68_20260930.json"
+      ],
+      "application_base": "0x08020000",
+      "application_limit": "0x08140000",
+      "application_bytes": 273344,
+      "application_sha256": "09b4147f080419b719e8cfa982f26c7efeea21159cfd8cee092e36ce2a5e3300",
+      "generation": 2026093001,
+      "image_crc32": "0xC16DF8A6",
+      "manifest_crc32": "0xB68E8CE2",
+      "release_flags": "0x64000220",
+      "loader_sha256": "cbe5d601a643d14ed25670acb6975e8bea7742d221258bc07badeeac8588594b",
+      "service_sha256": "fac200129654fefac89d3448d81c743d9f344fa5f1f8373ff0b13f4e4260ab28",
+      "sd": {
+        "legacy_magic_bytes": "44414f4c544f4f42",
+        "crc16": "0x4BDF",
+        "header_generation": 2026093001,
+        "manifest_generation_preserved": true,
+        "installed_manifest_crc32": "0xC99F01BA",
+        "installed_role": "slave"
+      },
+      "usb_dfu": {
+        "application_first": true,
+        "manifest_last": true
+      },
+      "ble_ota": {
+        "bytes": 273920,
+        "manifest_and_generation_preserved": true
+      },
+      "interrupted_update": "non-bootable until VALID manifest commit",
+      "warnings": []
+    }
+  ],
+  "source_contracts": {
+    "automatic_sd": "immediate on ordinary boot and after explicit USB BOOT_APPLICATION",
+    "forced_sd": "immediate INSTALL_SD mailbox path",
+    "usb_boot_probe_ms": 2000,
+    "usb_configured_policy": "stay in service until explicit ENTER_LOGGER/reset",
+    "usb_dfu_sd_policy": "invalidate and read-back sector 0x1000 before ROM DFU",
+    "transaction": "prevalidate, INSTALLING, erase/program/verify, VALID last",
+    "upgrade_led": "validation plus internal-flash waits/manifest commit",
+    "external_blockers": []
+  }
+}

@@ -1,10 +1,20 @@
 # CE64 firmware releases
 
-Latest test package: **Bootloader V6 + unchanged FM67, 2026-09-16**.
+Latest firmware release: **FM68 / Bootloader V6, 2026-09-30**.
+[Download the six HW1/HW2 Auto/Master/Slave fused HEX images](V6_FM68_20260930/).
+This packages the tested FM67 recorder baseline with a new release identifier;
+sampling, buffers, SD logic and V6 loader behavior are unchanged. All six offline
+package/role/memory gates pass. Fresh combined ephys/ADC/camera smoke testing
+was on the matching FM67 baseline, not all six FM68 variants; see the
+[release notes and remaining limits](V6_FM68_20260930/FM68_RELEASE_NOTES.md).
+The WILD Console installer is unchanged by this firmware-only release.
+
+Previous test package: **Bootloader V6 + unchanged FM67, 2026-09-16**.
 [Download the six V6 fused images and installation instructions](V6_FM67_20260916/).
 V6 restores startup USB detection. Physical USB testing is pending; install
 using full-image SWD or full-flash USB DFU, not an app-only SD/BLE update.
-Console .170 is unchanged and still bundles the V5 images below.
+Console .170 still bundles the V5 images below; select the newly downloaded
+FM68 HEX explicitly when updating.
 
 Additional test package: [Bootloader V6 + FM66 consumable SD-stage behavior,
 2026-09-19](V6_FM66_CONSUMABLE_20260919/). It is intentionally kept separate:
@@ -37,7 +47,7 @@ FM67 preserves the 64 MHz 20 kHz ephys-only policy. Its peak class is 108.8 MHz
 
 The same fused HEX is used for SD staging, BLE OTA, USB DFU or full SWD flash.
 A compatible WILD Console extracts the application for SD/BLE; those paths
-**do not replace the installed bootloader**. Installing/replacing Bootloader V5
+**do not replace the installed bootloader**. Installing/replacing the bootloader
 requires full-image programming by SWD or the supported full-flash USB option.
 An older installed loader retains its own update limitations.
 

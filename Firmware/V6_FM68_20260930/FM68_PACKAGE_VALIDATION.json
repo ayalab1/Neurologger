@@ -1,0 +1,54 @@
+{
+  "release": "CE64 Bootloader V6 / FM68",
+  "build_stamp": "20260930",
+  "generation": 2026093001,
+  "source_base": "747be92",
+  "production_source_delta": "FM_VERSION 67 to 68 only",
+  "compiler": "ARMCC5 all-C -O3; CE32_FILE_SD_SOURCE_PLAN=2",
+  "static_model_gates_passed": 13,
+  "per_variant_memory": {
+    "stack_bytes": 2096,
+    "keil_known_stack_bytes": 1584,
+    "stack_margin_bytes": 512,
+    "recorder_arena_bytes": 278528,
+    "linked_rw_bytes": 326932,
+    "sram_bytes": 327680,
+    "static_ram_headroom_bytes": 748
+  },
+  "all_six_offline_checks": {
+    "fused_sd_usb_ble_extraction_and_hw_role": "PASS",
+    "hex_address_coverage_vs_fm67_v6": "IDENTICAL",
+    "loader_core_bytes_vs_fm67_v6": "IDENTICAL",
+    "application_delta": "exactly five bytes: 67 to 68",
+    "resident_usb_service_delta": "exactly three bytes: 67 to 68",
+    "sizes_vectors_and_role_flags_vs_fm67_v6": "IDENTICAL"
+  },
+  "fresh_hardware_evidence": {
+    "installed_test_version": "FM67 / V6 HW2 Master",
+    "fused_sha256": "78e4060520fbcd7d58095e23f7537c07fb5d4d4e9d0710dcfc63707db2436b96",
+    "target_mac": "10A0022FF7F4",
+    "probe_serial": "0672FF515049657187221812",
+    "swd_khz": 480,
+    "profile": "20000 Hz ephys, 160000 Hz ADC, camera configured 16 fps",
+    "approximate_acquisition_seconds": 31.125,
+    "directory_append_and_finalization": "PASS",
+    "sampled_readback_address_and_crc": "PASS",
+    "sampled_begin_end_misc_counters_and_adc_activity": "PASS",
+    "remaining_limits": [
+      "FM68 variants not separately flashed on hardware",
+      "camera quality and actual frame rate unvalidated; repeated/all-zero payload warnings",
+      "complete stream chronology and losslessness unvalidated",
+      "paired endurance and physical ephys channel identity unvalidated",
+      "legacy diagnostic 0x81 retained",
+      "physical USB startup/update not exercised by this recording test"
+    ]
+  },
+  "files": {
+    "CE64_V6_FM68_HW1_Auto_20260930.hex": "d85707336db200932e01109bf5ffdb990ad4e664d92f188c5375a1d7b7970a79",
+    "CE64_V6_FM68_HW1_Master_20260930.hex": "01989682399c81464460ae5e6e47c197b3c042f55a8358aa2b3a572188343f6d",
+    "CE64_V6_FM68_HW1_Slave_20260930.hex": "897449ab6431b41a2997a6ad89380397ad5b36d64a3ce5b7e4a6584d64518518",
+    "CE64_V6_FM68_HW2_Auto_20260930.hex": "8758f47931ae66fb5e0c6df42a260ed636e4001d1795c8cf3ffe306538450525",
+    "CE64_V6_FM68_HW2_Master_20260930.hex": "ea74d3d123f8cbe5255ecbb4a36b68922ad47f4767a8510cfdac8c546e2c3215",
+    "CE64_V6_FM68_HW2_Slave_20260930.hex": "506270980c8611713dc5f6ed75fc611cfc5aba13c8908dbaaf63f8e307968989"
+  }
+}
