@@ -1,0 +1,147 @@
+{
+  "format": "CE64_BOOTLOADER_V4_JOINED_HIL_IMAGE",
+  "hex": {
+    "path": "D:\\Code\\CE64\\_artifacts\\fm69_camera_hotfix_20261006\\matrix\\WILD64X_HW2_Master\\WILD64X_HW2_Master_V6_FM69_20261006.hex",
+    "bytes": 1447029,
+    "sha256": "462f4cadda4a76957a63c365284d7a269f5938ed3080015228618f45c37b5529"
+  },
+  "vectors": {
+    "loader_sp": 536874104,
+    "loader_reset": 134218421
+  },
+  "application": {
+    "manifest": {
+      "magic": 3694726637799490883,
+      "format_version": 3,
+      "header_bytes": 128,
+      "state": 1145848150,
+      "image_id": 1,
+      "generation": 2026100601,
+      "image_base": 134348800,
+      "image_size": 273368,
+      "image_crc32": 757415329,
+      "vector_sp": 536883840,
+      "vector_reset": 134349625,
+      "build_id_hex": "744d15e83cd84d28e908a14804703827f95197331d86bd2a24f100725bc465f7",
+      "flags": 1677722128,
+      "header_crc32": 161046691,
+      "computed_header_crc32": 161046691,
+      "release_metadata": {
+        "format": "CE64_RELEASE_FLAGS_V1",
+        "hardware_pinout": "v2",
+        "role": "master"
+      },
+      "header_valid": true
+    },
+    "bytes": 273368,
+    "sha256": "744d15e83cd84d28e908a14804703827f95197331d86bd2a24f100725bc465f7"
+  },
+  "service": {
+    "manifest": {
+      "magic": 3771292255281104195,
+      "format_version": 4,
+      "header_bytes": 128,
+      "state": 1145848150,
+      "image_id": 64,
+      "generation": 2026100601,
+      "image_base": 135528960,
+      "image_size": 232664,
+      "image_crc32": 1600845901,
+      "vector_sp": 537185992,
+      "vector_reset": 135529777,
+      "build_id_hex": "f1e991ca536da99ec704619e1a20f08ff829fea4ea09157bfc9cc433b25e84b5",
+      "flags": 63,
+      "header_crc32": 471203272,
+      "computed_header_crc32": 471203272,
+      "header_valid": true
+    },
+    "bytes": 232664,
+    "sha256": "f1e991ca536da99ec704619e1a20f08ff829fea4ea09157bfc9cc433b25e84b5"
+  },
+  "regions": [
+    {
+      "base": 134217728,
+      "bytes": 7744,
+      "sha256": "f33b38c6156798177927d0ad7c08e03b373ec3fc61806e9bfde73f9df224c37f"
+    },
+    {
+      "base": 134283264,
+      "bytes": 128,
+      "sha256": "ba3c5f593887036432710919834b1bba4df34bc611792752f5acc73ce2f12830"
+    },
+    {
+      "base": 134348800,
+      "bytes": 273368,
+      "sha256": "744d15e83cd84d28e908a14804703827f95197331d86bd2a24f100725bc465f7"
+    },
+    {
+      "base": 135528448,
+      "bytes": 128,
+      "sha256": "a874831ec886bd6c09de3718b8e1a4fe7c766492995657cd9364862ec15b5623"
+    },
+    {
+      "base": 135528960,
+      "bytes": 232664,
+      "sha256": "f1e991ca536da99ec704619e1a20f08ff829fea4ea09157bfc9cc433b25e84b5"
+    }
+  ],
+  "program_regions": [
+    {
+      "base": 134217728,
+      "bytes": 7744,
+      "sha256": "f33b38c6156798177927d0ad7c08e03b373ec3fc61806e9bfde73f9df224c37f"
+    },
+    {
+      "base": 134283264,
+      "bytes": 128,
+      "sha256": "ba3c5f593887036432710919834b1bba4df34bc611792752f5acc73ce2f12830"
+    },
+    {
+      "base": 134348800,
+      "bytes": 273368,
+      "sha256": "744d15e83cd84d28e908a14804703827f95197331d86bd2a24f100725bc465f7"
+    },
+    {
+      "base": 135528448,
+      "bytes": 233176,
+      "sha256": "bd39305c5007531505c2ebc51b998fa6710923fc287d847ee7139809bc429d12"
+    }
+  ],
+  "warning": "Controlled SWD migration/HIL image; writes loader, app manifest/image, and resident service in one halted session.",
+  "firmware_version": 69,
+  "hardware_pinout": "v2",
+  "role": "master",
+  "bootloader_version": 6,
+  "sd_update": {
+    "user_selected_artifact": "fused_hex",
+    "console_output": "legacy_BOOTLOAD_application",
+    "manifest_address": "0x08010000",
+    "application_address": "0x08020000",
+    "application_limit": "0x08140000",
+    "application_bytes": 273368,
+    "release_generation": 2026100601,
+    "legacy_generation_policy": "fused_manifest_generation",
+    "console_extracts_application": true,
+    "preserves_application_bytes": true,
+    "preserves_compiled_role": true,
+    "deployed_v4_forced_update_compatible": true
+  },
+  "usb_dfu_update": {
+    "user_selected_artifact": "fused_hex",
+    "application_first": true,
+    "manifest_last": true,
+    "preserves_release_manifest": true
+  },
+  "ble_ota_update": {
+    "user_selected_artifact": "fused_hex",
+    "manifest_sector_bytes": 512,
+    "application_block_bytes": 512,
+    "preserves_release_manifest": true
+  },
+  "debug_symbols": {
+    "scope": "internal_hil_only",
+    "application_sha256": "744d15e83cd84d28e908a14804703827f95197331d86bd2a24f100725bc465f7",
+    "axf": "symbols/WILD64X_HW2_Master_V6_FM69_20261006.app.axf",
+    "map": "symbols/WILD64X_HW2_Master_V6_FM69_20261006.app.map"
+  }
+}

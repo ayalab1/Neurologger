@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.170",
-  "url": "https://github.com/ayalab1/Neurologger/raw/17000ceb28b2eb976d38d56b880ea14fbc9ee5ab/Software/wild_console_Setup_3.4.2.170.exe",
-  "sha256": "F267FF831EEDA01C02EBA7F429D08F070D69B355B8E3E52BD70F741619D2E64F",
-  "notes": "PC-only hotfix: bounded post-sync device-information retries without full resync, plus canceled-request ownership repair on reconnect. Build, deterministic tests and BLE review passed; new-core live validation remains pending. Bundles unchanged six FM67 V5 images. Malformed advertisements and the known bank-B export decoder limitation are not fixed; preserve original SD data."
+  "version": "3.4.2.182",
+  "url": "https://github.com/ayalab1/Neurologger/raw/main/Software/wild_console_Setup_3.4.2.182.exe",
+  "sha256": "4A9203765D1FA88ED7CB817B6F701D5B99A36C02A61BA280279226C6519571D8",
+  "notes": "Published WILD .182 camera/media controls and profile hotfixes, packaged with the standard install identity and six CE64 FM69/V6 fused HEX files. Installer payload verification and offline firmware gates passed. Full fused flash is required for the resident USB camera fix; SD/BLE update the app only. Camera endurance, full chronology and physical update delivery remain unqualified. Installation does not flash a device; preserve original SD data."
 }

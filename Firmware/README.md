@@ -1,6 +1,17 @@
 # CE64 firmware releases
 
-Latest firmware release: **FM68 / Bootloader V6, 2026-09-30**.
+Latest camera hotfix: **FM69 / Bootloader V6, 2026-10-06**.
+[Download the six HW1/HW2 Auto/Master/Slave fused HEX images](V6_FM69_CAMERA_HOTFIX_20261006/).
+This fixes the discard-DMA error classification and resident USB camera
+preparation while preserving the FM68 recorder path. All six builds, 13
+static/model gates and offline update/extraction/role checks passed. Camera
+image quality, full chronology and endurance remain unqualified; see the
+[release notes and limits](V6_FM69_CAMERA_HOTFIX_20261006/FM69_RELEASE_NOTES.md).
+[WILD Console 3.4.2.182](../Software/README.md) bundles the matching six images.
+Full fused flash is required for the resident USB camera fix; SD/BLE updates
+replace only the application, not the loader or service.
+
+Previous firmware release: **FM68 / Bootloader V6, 2026-09-30**.
 [Download the six HW1/HW2 Auto/Master/Slave fused HEX images](V6_FM68_20260930/).
 This packages the tested FM67 recorder baseline with a new release identifier;
 sampling, buffers, SD logic and V6 loader behavior are unchanged. All six offline
@@ -13,8 +24,8 @@ Previous test package: **Bootloader V6 + unchanged FM67, 2026-09-16**.
 [Download the six V6 fused images and installation instructions](V6_FM67_20260916/).
 V6 restores startup USB detection. Physical USB testing is pending; install
 using full-image SWD or full-flash USB DFU, not an app-only SD/BLE update.
-Console .170 still bundles the V5 images below; select the newly downloaded
-FM68 HEX explicitly when updating.
+Console .170 bundles the V5 images below. Select the downloaded V6 HEX
+explicitly if retaining that older console.
 
 Additional test package: [Bootloader V6 + FM66 consumable SD-stage behavior,
 2026-09-19](V6_FM66_CONSUMABLE_20260919/). It is intentionally kept separate:

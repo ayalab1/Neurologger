@@ -1,0 +1,149 @@
+{
+  "installer": "D:\\Code\\CE64\\_artifacts\\fm69_camera_hotfix_20261006\\console182\\_build_out\\installer\\wild_console\\Release\\output\\wild_console_Setup_3.4.2.182.exe",
+  "installer_sha256": "4a9203765d1fa88ed7cb817b6f701d5b99a36c02a61ba280279226c6519571d8",
+  "exact_payload_count": 28,
+  "nsis_blocks_read": 34,
+  "payloads": [
+    {
+      "path": "dfu-util-win64/dfu-prefix.exe",
+      "bytes": 600224,
+      "sha256": "8dcfdc83c367dba1434c1a7b00e81a4006a26aa9aadde7d244798787306d6afb"
+    },
+    {
+      "path": "dfu-util-win64/dfu-suffix.exe",
+      "bytes": 600223,
+      "sha256": "17b5795061cc589cec1fec34f5bef5d34fa87a7508fe13b3d2de08c28e5835e6"
+    },
+    {
+      "path": "dfu-util-win64/dfu-util-static.exe",
+      "bytes": 1872879,
+      "sha256": "89e6f78a5055795f558519d47567fb6395b523102e25c8f0098dcaa54dea3433"
+    },
+    {
+      "path": "dfu-util-win64/dfu-util.exe",
+      "bytes": 873073,
+      "sha256": "4023cf9686381d5d9962f995e572946db19df53872c2b26bd9863fef3e32bc75"
+    },
+    {
+      "path": "dfu-util-win64/libusb-1.0.dll",
+      "bytes": 1348226,
+      "sha256": "b9c8c1ac7bac10616afd3f9003e0eceeda3ac6e4c3f43489ba9cb5d8290de91d"
+    },
+    {
+      "path": "dfu-util-win64/README.txt",
+      "bytes": 587,
+      "sha256": "18b8ac8377bc94a1b79f8589fc13c446d6a8bc98eea396107a66516cd1b74894"
+    },
+    {
+      "path": "dll_upfirdn.dll",
+      "bytes": 84992,
+      "sha256": "5aa57e20d61c580af7a66abb1b97e8fae4c573bcaf775b643f8fdb0f3787f467"
+    },
+    {
+      "path": "ffmpeg/bin/ffmpeg.exe",
+      "bytes": 115454976,
+      "sha256": "e25e26fed20fe256a4286a1c1769599acdc2ff058824c1ddd0a6f3fe9782115d"
+    },
+    {
+      "path": "ffmpeg/bin/ffprobe.exe",
+      "bytes": 115331584,
+      "sha256": "a0aded49565545238bf3ef0400ef848fcc34d95efaaea5e0448cb085258cbf51"
+    },
+    {
+      "path": "firmware/CE64_V6_FM69_HW1_Auto_20261006.hex",
+      "bytes": 1447659,
+      "sha256": "c688d6a18b9c6a9c40118f3af6723d2cbc65247f9d63b8776c705a3a1ef60fdf"
+    },
+    {
+      "path": "firmware/CE64_V6_FM69_HW1_Master_20261006.hex",
+      "bytes": 1447299,
+      "sha256": "16ecb0229fd296592d61a794aa1fc815e67acf3db755a9e59f4fcf31ecb5b04f"
+    },
+    {
+      "path": "firmware/CE64_V6_FM69_HW1_Slave_20261006.hex",
+      "bytes": 1447299,
+      "sha256": "723b5676ba84ae6193882a196779aea0bf4ccc8e1a3d6706da527f52bc5e79ff"
+    },
+    {
+      "path": "firmware/CE64_V6_FM69_HW2_Auto_20261006.hex",
+      "bytes": 1447389,
+      "sha256": "1e4bb9f38da1f143b6face17a1b5330fe72ec43577b2430dd49c44816c02c22e"
+    },
+    {
+      "path": "firmware/CE64_V6_FM69_HW2_Master_20261006.hex",
+      "bytes": 1447029,
+      "sha256": "462f4cadda4a76957a63c365284d7a269f5938ed3080015228618f45c37b5529"
+    },
+    {
+      "path": "firmware/CE64_V6_FM69_HW2_Slave_20261006.hex",
+      "bytes": 1447029,
+      "sha256": "31e9c9094466a470d452267c9b1eae4ba8711016ef0469e4b04ae7f2359394af"
+    },
+    {
+      "path": "NPConfigurator/NPConfigurator.deps.json",
+      "bytes": 434,
+      "sha256": "bd00ba4e726fdb8cfa8e45bc34c381f2b11c5e6741b96884cdc4a4b6565227c9"
+    },
+    {
+      "path": "NPConfigurator/NPConfigurator.dll",
+      "bytes": 361984,
+      "sha256": "13e2840923451a7ade95c0a4f1f1a51eb147b00b8a24d5ed771c608ad92dfa86"
+    },
+    {
+      "path": "NPConfigurator/NPConfigurator.exe",
+      "bytes": 151552,
+      "sha256": "7e25b1d434dcff77ef9346b3fb4947aa30d984a8bd39256117ea918e15ae6ba0"
+    },
+    {
+      "path": "NPConfigurator/NPConfigurator.pdb",
+      "bytes": 40872,
+      "sha256": "5e1eed0a86e4d6cdaf71f2d29f62cecc4c6cc1d8c43bf867cc4a56f6d1496acc"
+    },
+    {
+      "path": "NPConfigurator/NPConfigurator.runtimeconfig.json",
+      "bytes": 458,
+      "sha256": "c71152bf25e40d647b2440c5b39be157a3d356106be9d5b678ab97bb87b4e782"
+    },
+    {
+      "path": "NpV2SdDatExport.dll",
+      "bytes": 145408,
+      "sha256": "47f9339aa5c4469804518684279858cc277f379994a4e6e0cf979fd4fa2b67d0"
+    },
+    {
+      "path": "System.Buffers.dll",
+      "bytes": 27992,
+      "sha256": "9444b5a41a816b193c033bec199d74cdfc8298ed8300a3c39a4e953dec137494"
+    },
+    {
+      "path": "System.Memory.dll",
+      "bytes": 148760,
+      "sha256": "41b5e1a4c59abdb1ce1467f58c3d9fd06d39dff4fc61d500a2410fece8037f4b"
+    },
+    {
+      "path": "System.Numerics.Vectors.dll",
+      "bytes": 115936,
+      "sha256": "a044d77edb6e8db4053bf67cc671e7687c226c1b9b0963a81ebe359ce79dfdf7"
+    },
+    {
+      "path": "System.Resources.Extensions.dll",
+      "bytes": 54136,
+      "sha256": "3ad343161c35186f9185b87bd3ada2f652c4ceea3bd08e23abab7af2ae3fc66b"
+    },
+    {
+      "path": "System.Runtime.CompilerServices.Unsafe.dll",
+      "bytes": 23600,
+      "sha256": "1ad2dd7225d5162a0fd3a3b337a1949448520e3130a4bc8e010ec02f76097500"
+    },
+    {
+      "path": "WILD_console.exe",
+      "bytes": 2082816,
+      "sha256": "60f76b88c779a338be71d0121d8a7c88971fc88ca4b5570fc8c6ef64df091bd2"
+    },
+    {
+      "path": "WILD_console.exe.config",
+      "bytes": 590,
+      "sha256": "50543a6f3d7a99095515b229a5d3c9170b39134fc3f472fb7148ae063fb2625e"
+    }
+  ],
+  "method": "Read-only raw-deflate decompression; every staged payload compared byte-for-byte; setup not executed"
+}

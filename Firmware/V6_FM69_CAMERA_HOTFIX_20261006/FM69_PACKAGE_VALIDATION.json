@@ -1,0 +1,33 @@
+{
+  "release": "CE64 FM69 camera hotfix with Bootloader V6",
+  "build_stamp": "20261006",
+  "generation": 2026100601,
+  "source_base": "0f11b709",
+  "source_commit": "a68d62e6d4056808b175ed3ebe5a5b35c419fb2a",
+  "compiler": "ARMCC5 all-C -O3; CE32_FILE_SD_SOURCE_PLAN=2",
+  "variants_built": 6,
+  "static_model_gates_passed": 13,
+  "camera_discard_model_checks_passed": 7,
+  "usb_camera_prepare_source_guards": "PASS",
+  "fused_sd_usb_ble_extraction_and_hw_role": "PASS",
+  "source_review": "PASS scoped camera fixes; recorder unchanged",
+  "per_variant_memory": {
+    "linked_rw_bytes": 326932,
+    "sram_bytes": 327680,
+    "static_ram_headroom_bytes": 748
+  },
+  "console_version": "3.4.2.182",
+  "console_source_commit": "fe4fe88b16b6ac42d2c0b4309fbbb428bbca7eee",
+  "console_executable_sha256": "60F76B88C779A338BE71D0121D8A7C88971FC88CA4B5570FC8C6EF64DF091BD2",
+  "installer_sha256": "4A9203765D1FA88ED7CB817B6F701D5B99A36C02A61BA280279226C6519571D8",
+  "installer_payloads_verified_byte_for_byte": 28,
+  "hardware_actions_for_this_release": 0,
+  "prior_sd_camera_content_gate": "FAIL: 11 warnings",
+  "remaining_unvalidated": [
+    "FM69 hardware runtime and decoded image quality",
+    "full camera chronology and losslessness",
+    "combined peak throughput and paired recording",
+    "physical SD/BLE/USB update delivery",
+    "endurance and complete download/channel ordering"
+  ]
+}

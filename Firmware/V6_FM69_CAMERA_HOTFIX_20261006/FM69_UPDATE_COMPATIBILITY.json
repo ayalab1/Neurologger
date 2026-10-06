@@ -1,0 +1,252 @@
+{
+  "status": "PASS",
+  "format": "CE64_V4_UPDATE_COMPATIBILITY_FIXTURE_V1",
+  "release_root": "D:\\Code\\CE64\\_artifacts\\fm69_camera_hotfix_20261006\\matrix",
+  "single_selected_artifact": "fused_hex",
+  "variants": [
+    {
+      "name": "WILD64X_HW1_Auto",
+      "hardware": "HW1",
+      "pinout": "v1",
+      "role": "auto",
+      "fused_hex": "D:\\Code\\CE64\\_artifacts\\fm69_camera_hotfix_20261006\\matrix\\WILD64X_HW1_Auto\\WILD64X_HW1_Auto_V6_FM69_20261006.hex",
+      "public_files": [
+        "WILD64X_HW1_Auto_V6_FM69_20261006.hex",
+        "WILD64X_HW1_Auto_V6_FM69_20261006.json"
+      ],
+      "application_base": "0x08020000",
+      "application_limit": "0x08140000",
+      "application_bytes": 273592,
+      "application_sha256": "0866f4028cf873cdd10d8bd8efcab3e2e81d1d5e0059dcb20af745aefbfd1802",
+      "generation": 2026100601,
+      "image_crc32": "0x74450F05",
+      "manifest_crc32": "0xAC5FB80D",
+      "release_flags": "0x64000100",
+      "loader_sha256": "cbe5d601a643d14ed25670acb6975e8bea7742d221258bc07badeeac8588594b",
+      "service_sha256": "4783ee6841fb9d84fe4e7ee82471f959b1ab8b1d770dcc4baf1173ffe394959f",
+      "sd": {
+        "legacy_magic_bytes": "44414f4c544f4f42",
+        "crc16": "0xFC55",
+        "header_generation": 2026100601,
+        "manifest_generation_preserved": true,
+        "installed_manifest_crc32": "0xB215D940",
+        "installed_role": "auto"
+      },
+      "usb_dfu": {
+        "application_first": true,
+        "manifest_last": true
+      },
+      "ble_ota": {
+        "bytes": 274432,
+        "manifest_and_generation_preserved": true
+      },
+      "interrupted_update": "non-bootable until VALID manifest commit",
+      "warnings": []
+    },
+    {
+      "name": "WILD64X_HW1_Master",
+      "hardware": "HW1",
+      "pinout": "v1",
+      "role": "master",
+      "fused_hex": "D:\\Code\\CE64\\_artifacts\\fm69_camera_hotfix_20261006\\matrix\\WILD64X_HW1_Master\\WILD64X_HW1_Master_V6_FM69_20261006.hex",
+      "public_files": [
+        "WILD64X_HW1_Master_V6_FM69_20261006.hex",
+        "WILD64X_HW1_Master_V6_FM69_20261006.json"
+      ],
+      "application_base": "0x08020000",
+      "application_limit": "0x08140000",
+      "application_bytes": 273464,
+      "application_sha256": "0ad9d856f74c81b345d40fd32026603f183074e32c57225f4e1b4d96cc68704d",
+      "generation": 2026100601,
+      "image_crc32": "0xE866849C",
+      "manifest_crc32": "0xE23155CC",
+      "release_flags": "0x64000110",
+      "loader_sha256": "cbe5d601a643d14ed25670acb6975e8bea7742d221258bc07badeeac8588594b",
+      "service_sha256": "4783ee6841fb9d84fe4e7ee82471f959b1ab8b1d770dcc4baf1173ffe394959f",
+      "sd": {
+        "legacy_magic_bytes": "44414f4c544f4f42",
+        "crc16": "0x7091",
+        "header_generation": 2026100601,
+        "manifest_generation_preserved": true,
+        "installed_manifest_crc32": "0xAA61ACF8",
+        "installed_role": "master"
+      },
+      "usb_dfu": {
+        "application_first": true,
+        "manifest_last": true
+      },
+      "ble_ota": {
+        "bytes": 274432,
+        "manifest_and_generation_preserved": true
+      },
+      "interrupted_update": "non-bootable until VALID manifest commit",
+      "warnings": []
+    },
+    {
+      "name": "WILD64X_HW1_Slave",
+      "hardware": "HW1",
+      "pinout": "v1",
+      "role": "slave",
+      "fused_hex": "D:\\Code\\CE64\\_artifacts\\fm69_camera_hotfix_20261006\\matrix\\WILD64X_HW1_Slave\\WILD64X_HW1_Slave_V6_FM69_20261006.hex",
+      "public_files": [
+        "WILD64X_HW1_Slave_V6_FM69_20261006.hex",
+        "WILD64X_HW1_Slave_V6_FM69_20261006.json"
+      ],
+      "application_base": "0x08020000",
+      "application_limit": "0x08140000",
+      "application_bytes": 273464,
+      "application_sha256": "4750515ce737447a70895b7cac1460f6aa4fd3c5db4c6e9193659e2f4f6caf1f",
+      "generation": 2026100601,
+      "image_crc32": "0xBF5FC518",
+      "manifest_crc32": "0x1238F92C",
+      "release_flags": "0x64000120",
+      "loader_sha256": "cbe5d601a643d14ed25670acb6975e8bea7742d221258bc07badeeac8588594b",
+      "service_sha256": "4783ee6841fb9d84fe4e7ee82471f959b1ab8b1d770dcc4baf1173ffe394959f",
+      "sd": {
+        "legacy_magic_bytes": "44414f4c544f4f42",
+        "crc16": "0x9A33",
+        "header_generation": 2026100601,
+        "manifest_generation_preserved": true,
+        "installed_manifest_crc32": "0x1542E494",
+        "installed_role": "slave"
+      },
+      "usb_dfu": {
+        "application_first": true,
+        "manifest_last": true
+      },
+      "ble_ota": {
+        "bytes": 274432,
+        "manifest_and_generation_preserved": true
+      },
+      "interrupted_update": "non-bootable until VALID manifest commit",
+      "warnings": []
+    },
+    {
+      "name": "WILD64X_HW2_Auto",
+      "hardware": "HW2",
+      "pinout": "v2",
+      "role": "auto",
+      "fused_hex": "D:\\Code\\CE64\\_artifacts\\fm69_camera_hotfix_20261006\\matrix\\WILD64X_HW2_Auto\\WILD64X_HW2_Auto_V6_FM69_20261006.hex",
+      "public_files": [
+        "WILD64X_HW2_Auto_V6_FM69_20261006.hex",
+        "WILD64X_HW2_Auto_V6_FM69_20261006.json"
+      ],
+      "application_base": "0x08020000",
+      "application_limit": "0x08140000",
+      "application_bytes": 273496,
+      "application_sha256": "bd4b232c0f4a2e86136808975339c79c03848ce5802b8aeb5ad6cc7e5f353a7d",
+      "generation": 2026100601,
+      "image_crc32": "0xD22DD850",
+      "manifest_crc32": "0x2EE9CEC0",
+      "release_flags": "0x64000200",
+      "loader_sha256": "cbe5d601a643d14ed25670acb6975e8bea7742d221258bc07badeeac8588594b",
+      "service_sha256": "4783ee6841fb9d84fe4e7ee82471f959b1ab8b1d770dcc4baf1173ffe394959f",
+      "sd": {
+        "legacy_magic_bytes": "44414f4c544f4f42",
+        "crc16": "0xC2E6",
+        "header_generation": 2026100601,
+        "manifest_generation_preserved": true,
+        "installed_manifest_crc32": "0x30B4D6B2",
+        "installed_role": "auto"
+      },
+      "usb_dfu": {
+        "application_first": true,
+        "manifest_last": true
+      },
+      "ble_ota": {
+        "bytes": 274432,
+        "manifest_and_generation_preserved": true
+      },
+      "interrupted_update": "non-bootable until VALID manifest commit",
+      "warnings": []
+    },
+    {
+      "name": "WILD64X_HW2_Master",
+      "hardware": "HW2",
+      "pinout": "v2",
+      "role": "master",
+      "fused_hex": "D:\\Code\\CE64\\_artifacts\\fm69_camera_hotfix_20261006\\matrix\\WILD64X_HW2_Master\\WILD64X_HW2_Master_V6_FM69_20261006.hex",
+      "public_files": [
+        "WILD64X_HW2_Master_V6_FM69_20261006.hex",
+        "WILD64X_HW2_Master_V6_FM69_20261006.json"
+      ],
+      "application_base": "0x08020000",
+      "application_limit": "0x08140000",
+      "application_bytes": 273368,
+      "application_sha256": "744d15e83cd84d28e908a14804703827f95197331d86bd2a24f100725bc465f7",
+      "generation": 2026100601,
+      "image_crc32": "0x2D253DA1",
+      "manifest_crc32": "0x099960A3",
+      "release_flags": "0x64000210",
+      "loader_sha256": "cbe5d601a643d14ed25670acb6975e8bea7742d221258bc07badeeac8588594b",
+      "service_sha256": "4783ee6841fb9d84fe4e7ee82471f959b1ab8b1d770dcc4baf1173ffe394959f",
+      "sd": {
+        "legacy_magic_bytes": "44414f4c544f4f42",
+        "crc16": "0xCA1A",
+        "header_generation": 2026100601,
+        "manifest_generation_preserved": true,
+        "installed_manifest_crc32": "0x7B193C03",
+        "installed_role": "master"
+      },
+      "usb_dfu": {
+        "application_first": true,
+        "manifest_last": true
+      },
+      "ble_ota": {
+        "bytes": 273920,
+        "manifest_and_generation_preserved": true
+      },
+      "interrupted_update": "non-bootable until VALID manifest commit",
+      "warnings": []
+    },
+    {
+      "name": "WILD64X_HW2_Slave",
+      "hardware": "HW2",
+      "pinout": "v2",
+      "role": "slave",
+      "fused_hex": "D:\\Code\\CE64\\_artifacts\\fm69_camera_hotfix_20261006\\matrix\\WILD64X_HW2_Slave\\WILD64X_HW2_Slave_V6_FM69_20261006.hex",
+      "public_files": [
+        "WILD64X_HW2_Slave_V6_FM69_20261006.hex",
+        "WILD64X_HW2_Slave_V6_FM69_20261006.json"
+      ],
+      "application_base": "0x08020000",
+      "application_limit": "0x08140000",
+      "application_bytes": 273368,
+      "application_sha256": "3d51246fd3456166af55faac3427e79a2a9499424677c072ec2f8c7bacdf3b22",
+      "generation": 2026100601,
+      "image_crc32": "0x9F1CAFB3",
+      "manifest_crc32": "0xB3A0015B",
+      "release_flags": "0x64000220",
+      "loader_sha256": "cbe5d601a643d14ed25670acb6975e8bea7742d221258bc07badeeac8588594b",
+      "service_sha256": "4783ee6841fb9d84fe4e7ee82471f959b1ab8b1d770dcc4baf1173ffe394959f",
+      "sd": {
+        "legacy_magic_bytes": "44414f4c544f4f42",
+        "crc16": "0x5830",
+        "header_generation": 2026100601,
+        "manifest_generation_preserved": true,
+        "installed_manifest_crc32": "0x32CAA8B1",
+        "installed_role": "slave"
+      },
+      "usb_dfu": {
+        "application_first": true,
+        "manifest_last": true
+      },
+      "ble_ota": {
+        "bytes": 273920,
+        "manifest_and_generation_preserved": true
+      },
+      "interrupted_update": "non-bootable until VALID manifest commit",
+      "warnings": []
+    }
+  ],
+  "source_contracts": {
+    "automatic_sd": "immediate on ordinary boot and after explicit USB BOOT_APPLICATION",
+    "forced_sd": "immediate INSTALL_SD mailbox path",
+    "usb_boot_probe_ms": 2000,
+    "usb_configured_policy": "stay in service until explicit ENTER_LOGGER/reset",
+    "usb_dfu_sd_policy": "invalidate and read-back sector 0x1000 before ROM DFU",
+    "transaction": "prevalidate, INSTALLING, erase/program/verify, VALID last",
+    "upgrade_led": "validation plus internal-flash waits/manifest commit",
+    "external_blockers": []
+  }
+}
