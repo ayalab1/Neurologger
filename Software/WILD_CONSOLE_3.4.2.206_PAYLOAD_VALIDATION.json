@@ -1,0 +1,134 @@
+{
+  "version": "3.4.2.206",
+  "stage": "release",
+  "date": "2026-10-23",
+  "publication_kind": "CE128_legacy_MISO2A_alignment",
+  "source_base_commit": "3f5217b68959d06c120f22c0d06e68137c9c6e8c",
+  "source_scope": "Committed205 source plus per-record MISO2-A compatibility detection and explicit override API. No private Neuropixels changes integrated.",
+  "installer": {
+    "file": "WILD_console_Setup_3.4.2.206.exe",
+    "sha256": "59F79818F70222DC5FA50047657489D39FCB462E8BAA41ADEE987E513984F6AB",
+    "bytes": 90010401
+  },
+  "payload": [
+    {
+      "path": "dll_upfirdn.dll",
+      "sha256": "5AA57E20D61C580AF7A66ABB1B97E8FAE4C573BCAF775B643F8FDB0F3787F467",
+      "bytes": 84992
+    },
+    {
+      "path": "NpV2SdDatExport.dll",
+      "sha256": "AFAC29FB41434604DD8D81BE4E226EE2CA90849156134D36DC62D590541F26A1",
+      "bytes": 144384
+    },
+    {
+      "path": "System.Buffers.dll",
+      "sha256": "9444B5A41A816B193C033BEC199D74CDFC8298ED8300A3C39A4E953DEC137494",
+      "bytes": 27992
+    },
+    {
+      "path": "System.Memory.dll",
+      "sha256": "41B5E1A4C59ABDB1CE1467F58C3D9FD06D39DFF4FC61D500A2410FECE8037F4B",
+      "bytes": 148760
+    },
+    {
+      "path": "System.Numerics.Vectors.dll",
+      "sha256": "A044D77EDB6E8DB4053BF67CC671E7687C226C1B9B0963A81EBE359CE79DFDF7",
+      "bytes": 115936
+    },
+    {
+      "path": "System.Resources.Extensions.dll",
+      "sha256": "3AD343161C35186F9185B87BD3ADA2F652C4CEEA3BD08E23ABAB7AF2AE3FC66B",
+      "bytes": 54136
+    },
+    {
+      "path": "System.Runtime.CompilerServices.Unsafe.dll",
+      "sha256": "1AD2DD7225D5162A0FD3A3B337A1949448520E3130A4BC8E010EC02F76097500",
+      "bytes": 23600
+    },
+    {
+      "path": "WILD_console.exe",
+      "sha256": "6E383AF17395E27A079DD9167FE4CDA6D1B228D9E2D5A3E4E746E66D182E13FE",
+      "bytes": 2086400
+    },
+    {
+      "path": "WILD_console.exe.config",
+      "sha256": "50543A6F3D7A99095515B229A5D3C9170B39134FC3F472FB7148AE063FB2625E",
+      "bytes": 590
+    },
+    {
+      "path": "dfu-util-win64\\dfu-prefix.exe",
+      "sha256": "8DCFDC83C367DBA1434C1A7B00E81A4006A26AA9AADDE7D244798787306D6AFB",
+      "bytes": 600224
+    },
+    {
+      "path": "dfu-util-win64\\dfu-suffix.exe",
+      "sha256": "17B5795061CC589CEC1FEC34F5BEF5D34FA87A7508FE13B3D2DE08C28E5835E6",
+      "bytes": 600223
+    },
+    {
+      "path": "dfu-util-win64\\dfu-util-static.exe",
+      "sha256": "89E6F78A5055795F558519D47567FB6395B523102E25C8F0098DCAA54DEA3433",
+      "bytes": 1872879
+    },
+    {
+      "path": "dfu-util-win64\\dfu-util.exe",
+      "sha256": "4023CF9686381D5D9962F995E572946DB19DF53872C2B26BD9863FEF3E32BC75",
+      "bytes": 873073
+    },
+    {
+      "path": "dfu-util-win64\\libusb-1.0.dll",
+      "sha256": "B9C8C1AC7BAC10616AFD3F9003E0ECEEDA3AC6E4C3F43489BA9CB5D8290DE91D",
+      "bytes": 1348226
+    },
+    {
+      "path": "dfu-util-win64\\README.txt",
+      "sha256": "18B8AC8377BC94A1B79F8589FC13C446D6A8BC98EEA396107A66516CD1B74894",
+      "bytes": 587
+    },
+    {
+      "path": "ffmpeg\\bin\\ffmpeg.exe",
+      "sha256": "E25E26FED20FE256A4286A1C1769599ACDC2FF058824C1DDD0A6F3FE9782115D",
+      "bytes": 115454976
+    },
+    {
+      "path": "ffmpeg\\bin\\ffprobe.exe",
+      "sha256": "A0ADED49565545238BF3EF0400EF848FCC34D95EFAAEA5E0448CB085258CBF51",
+      "bytes": 115331584
+    },
+    {
+      "path": "NPConfigurator\\NPConfigurator.deps.json",
+      "sha256": "BD00BA4E726FDB8CFA8E45BC34C381F2B11C5E6741B96884CDC4A4B6565227C9",
+      "bytes": 434
+    },
+    {
+      "path": "NPConfigurator\\NPConfigurator.dll",
+      "sha256": "710853170210E165F7A35E3E24418C7B41E01DAB3D47C5E4F6455E0BF594C4FD",
+      "bytes": 361984
+    },
+    {
+      "path": "NPConfigurator\\NPConfigurator.exe",
+      "sha256": "7E25B1D434DCFF77EF9346B3FB4947AA30D984A8BD39256117EA918E15AE6BA0",
+      "bytes": 151552
+    },
+    {
+      "path": "NPConfigurator\\NPConfigurator.pdb",
+      "sha256": "C74E5FA09D699899314E5041DDD28DBCBDF295BFF9D0F9ED68729C94DFB94733",
+      "bytes": 40744
+    },
+    {
+      "path": "NPConfigurator\\NPConfigurator.runtimeconfig.json",
+      "sha256": "C71152BF25E40D647B2440C5B39BE157A3D356106BE9D5B678AB97BB87B4E782",
+      "bytes": 458
+    }
+  ],
+  "extractedPayloadFilesVerified": 22,
+  "validation_scope": "Actual206 assembly: 96 export cases/34961393 checks, four layouts, exact samples/MISC/timestamps and JSON; compatibility negatives, explicit overrides and three read boundaries. Provided recording beginning/middle/end reconstructed raw-lane windows decode exactly, without changing other banks. Full repaired export is a validated bank2-only transform with original sample/channel addresses and independently verified output bytes. All22 installer payloads match; companions unchanged.",
+  "firmware_changed": false,
+  "neuropixels_source_changed": false,
+  "companions_rebuilt": false,
+  "installerExecuted": false,
+  "hardwareAccess": false,
+  "installed_pair_validated": false,
+  "limitations": "Conservative prefix-signature classification, not proof of capture width for every recording. Missing physical LSB is zero, not recovered; residual outliers remain. Validation used exported data, not original raw SD readback or new device capture. No installed-GUI, firmware-pair or Neuropixels/media qualification. No bundled firmware."
+}

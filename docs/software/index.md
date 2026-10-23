@@ -39,7 +39,7 @@ Software documentation covers how to connect to the WILD device, configure recor
 
 ## Install
 
-Download [WILD Console 3.4.2.205](https://github.com/ayalab1/Neurologger/raw/main/Software/WILD_console_Setup_3.4.2.205.exe). Existing installations can also use the Console's update prompt. This CE128-focused release fixes download metadata JSON and includes no private Neuropixels updates or firmware. The existing [firmware downloads](https://github.com/ayalab1/Neurologger/tree/main/Firmware) are unchanged. Read the [release notes and offline-validation limits](https://github.com/ayalab1/Neurologger/blob/main/Software/WILD_CONSOLE_3.4.2.205.md) before exporting data.
+Download [WILD Console 3.4.2.206](https://github.com/ayalab1/Neurologger/raw/main/Software/WILD_console_Setup_3.4.2.206.exe). Existing installations can also use the Console's update prompt. This CE128-focused release adds per-record compatibility for legacy15-bit MISO2-A captures, with unchanged native16-bit data and recorded alignment provenance. No private Neuropixels or firmware updates are included; existing [firmware downloads](https://github.com/ayalab1/Neurologger/tree/main/Firmware) are unchanged. Read the [release notes and validation/recovery limits](https://github.com/ayalab1/Neurologger/blob/main/Software/WILD_CONSOLE_3.4.2.206.md) before exporting data.
 
 ## Public Workflow Boundary
 

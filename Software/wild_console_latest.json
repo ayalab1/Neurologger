@@ -1,6 +1,6 @@
 {
-  "version": "3.4.2.205",
-  "url": "https://github.com/ayalab1/Neurologger/raw/main/Software/WILD_console_Setup_3.4.2.205.exe",
-  "sha256": "D3D5199B1F8F3174F7E311C07C786B37D533DAA40197760A6D5A23D4368F1245",
-  "notes": "CE128 download metadata JSON fix. The actual release binary passed 96 export cases across four amplifier layouts, strict JSON checks and verification of all 22 installer runtime files. Built from committed WILD source; no private Neuropixels updates or firmware changes. No firmware is bundled. Offline software validation only, not a new device, installed-GUI or firmware/installer-pair qualification. See Software/WILD_CONSOLE_3.4.2.205.md for scope and limits."
+  "version": "3.4.2.206",
+  "url": "https://github.com/ayalab1/Neurologger/raw/main/Software/WILD_console_Setup_3.4.2.206.exe",
+  "sha256": "59F79818F70222DC5FA50047657489D39FCB462E8BAA41ADEE987E513984F6AB",
+  "notes": "CE128 per-record legacy MISO2-A15-bit alignment compatibility. Conservative signature detection preserves native16-bit data and records decisions in JSON. Validated on provided recording windows and96 export cases; all22 installer payloads verified. Missing physical LSBs and residual artifacts are not recovered. No private Neuropixels or firmware updates; no firmware bundled. Offline exported-data validation, not new raw-SD/device or installed-pair qualification. See Software/WILD_CONSOLE_3.4.2.206.md."
 }
